@@ -8,10 +8,14 @@
 #include <wlr/render/allocator.h>
 #include <wlr/render/pass.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_scene.h>
+#include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_xdg_shell.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 #include "input.h"
@@ -21,14 +25,27 @@ struct horizon_server {
     struct wlr_backend *backend;
     struct wlr_renderer *renderer;
     struct wlr_allocator *allocator;
+    struct wlr_compositor *compositor;
+    struct wlr_xdg_shell *xdg_shell;
+    struct wlr_scene *scene;
     struct wlr_seat *seat;
     struct wl_listener new_output;
     struct wl_listener new_input;
+    struct wl_listener new_toplevel;
 };
 
 struct horizon_output {
     struct wlr_output *output;
+    struct wlr_scene_output *scene_output;
     struct wl_listener frame;
+    struct wl_listener destroy;
+};
+
+struct horizon_xdg_toplevel {
+    struct wlr_xdg_toplevel *toplevel;
+    struct wlr_scene_tree *scene_tree;
+    struct wl_listener map;
+    struct wl_listener unmap;
     struct wl_listener destroy;
 };
 
@@ -102,6 +119,63 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
     }
 }
 
+static void handle_xdg_map(struct wl_listener *listener, void *data) {
+    (void)data;
+
+    struct horizon_xdg_toplevel *view =
+        wl_container_of(listener, view, map);
+    wlr_xdg_toplevel_set_activated(view->toplevel, true);
+}
+
+static void handle_xdg_unmap(struct wl_listener *listener, void *data) {
+    (void)listener;
+    (void)data;
+}
+
+static void handle_xdg_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+
+    struct horizon_xdg_toplevel *view =
+        wl_container_of(listener, view, destroy);
+    wl_list_remove(&view->map.link);
+    wl_list_remove(&view->unmap.link);
+    wl_list_remove(&view->destroy.link);
+    free(view);
+}
+
+static void handle_new_toplevel(struct wl_listener *listener, void *data) {
+    struct horizon_server *server =
+        wl_container_of(listener, server, new_toplevel);
+    struct wlr_xdg_toplevel *toplevel = data;
+
+    struct horizon_xdg_toplevel *view = calloc(1, sizeof(*view));
+    if (view == NULL) {
+        fprintf(stderr, "horizon: failed to allocate xdg toplevel\n");
+        return;
+    }
+
+    view->toplevel = toplevel;
+    view->scene_tree = wlr_scene_xdg_surface_create(
+        &server->scene->tree, toplevel->base);
+    if (view->scene_tree == NULL) {
+        fprintf(stderr, "horizon: failed to create xdg scene surface\n");
+        free(view);
+        return;
+    }
+    wlr_scene_node_set_position(&view->scene_tree->node, 80, 80);
+
+    view->map.notify = handle_xdg_map;
+    view->unmap.notify = handle_xdg_unmap;
+    view->destroy.notify = handle_xdg_destroy;
+    wl_signal_add(&toplevel->base->surface->events.map, &view->map);
+    wl_signal_add(&toplevel->base->surface->events.unmap, &view->unmap);
+    wl_signal_add(&toplevel->base->events.destroy, &view->destroy);
+
+    printf("XDG toplevel ready: %s\n",
+        toplevel->title != NULL ? toplevel->title : "untitled");
+    fflush(stdout);
+}
+
 static void handle_new_input(struct wl_listener *listener, void *data) {
     struct horizon_server *server =
         wl_container_of(listener, server, new_input);
@@ -138,28 +212,9 @@ static void render_frame(struct wl_listener *listener, void *data) {
 
     struct horizon_output *horizon_output =
         wl_container_of(listener, horizon_output, frame);
-    struct wlr_output *output = horizon_output->output;
-    struct wlr_output_state state;
-    wlr_output_state_init(&state);
-
-    struct wlr_render_pass *pass =
-        wlr_output_begin_render_pass(output, &state, NULL);
-    if (pass == NULL) {
-        wlr_output_state_finish(&state);
-        return;
-    }
-
-    struct wlr_render_rect_options background = {
-        .box = { .x = 0, .y = 0, .width = output->width, .height = output->height },
-        .color = { .r = 0.08f, .g = 0.12f, .b = 0.20f, .a = 1.0f },
-        .blend_mode = WLR_RENDER_BLEND_MODE_NONE,
-    };
-    wlr_render_pass_add_rect(pass, &background);
-
-    if (!wlr_render_pass_submit(pass) || !wlr_output_commit_state(output, &state)) {
+    if (!wlr_scene_output_commit(horizon_output->scene_output, NULL)) {
         fprintf(stderr, "horizon: failed to commit output frame\n");
     }
-    wlr_output_state_finish(&state);
 }
 
 static void handle_output_destroy(struct wl_listener *listener, void *data) {
@@ -167,6 +222,7 @@ static void handle_output_destroy(struct wl_listener *listener, void *data) {
 
     struct horizon_output *horizon_output =
         wl_container_of(listener, horizon_output, destroy);
+    wlr_scene_output_destroy(horizon_output->scene_output);
     wl_list_remove(&horizon_output->frame.link);
     wl_list_remove(&horizon_output->destroy.link);
     free(horizon_output);
@@ -205,6 +261,16 @@ static void handle_new_output(struct wl_listener *listener, void *data) {
         return;
     }
     horizon_output->output = output;
+    horizon_output->scene_output = wlr_scene_output_create(server->scene, output);
+    if (horizon_output->scene_output == NULL) {
+        fprintf(stderr, "horizon: failed to create scene output\n");
+        free(horizon_output);
+        return;
+    }
+
+    const float background_color[] = { 0.08f, 0.12f, 0.20f, 1.0f };
+    wlr_scene_rect_create(&server->scene->tree, output->width,
+        output->height, background_color);
     horizon_output->frame.notify = render_frame;
     horizon_output->destroy.notify = handle_output_destroy;
     wl_signal_add(&output->events.frame, &horizon_output->frame);
@@ -256,6 +322,31 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
+    server.compositor = wlr_compositor_create(server.display, 6, server.renderer);
+    if (server.compositor == NULL ||
+        wlr_subcompositor_create(server.display) == NULL) {
+        fprintf(stderr, "horizon: failed to create compositor globals\n");
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wlr_seat_destroy(server.seat);
+        wl_display_destroy(server.display);
+        return EXIT_FAILURE;
+    }
+
+    server.xdg_shell = wlr_xdg_shell_create(server.display, 3);
+    server.scene = wlr_scene_create();
+    if (server.xdg_shell == NULL || server.scene == NULL) {
+        fprintf(stderr, "horizon: failed to create xdg-shell scene\n");
+        if (server.scene != NULL) {
+            wlr_scene_node_destroy(&server.scene->tree.node);
+        }
+        wlr_renderer_destroy(server.renderer);
+        wlr_backend_destroy(server.backend);
+        wlr_seat_destroy(server.seat);
+        wl_display_destroy(server.display);
+        return EXIT_FAILURE;
+    }
+
     server.allocator = wlr_allocator_autocreate(server.backend, server.renderer);
     if (server.allocator == NULL) {
         fprintf(stderr, "horizon: failed to create allocator\n");
@@ -270,12 +361,15 @@ int main(void) {
     wl_signal_add(&server.backend->events.new_output, &server.new_output);
     server.new_input.notify = handle_new_input;
     wl_signal_add(&server.backend->events.new_input, &server.new_input);
+    server.new_toplevel.notify = handle_new_toplevel;
+    wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_toplevel);
 
     if (!wlr_backend_start(server.backend)) {
         fprintf(stderr, "horizon: failed to start wlroots backend\n");
         wlr_allocator_destroy(server.allocator);
         wlr_renderer_destroy(server.renderer);
         wlr_backend_destroy(server.backend);
+        wlr_scene_node_destroy(&server.scene->tree.node);
         wlr_seat_destroy(server.seat);
         wl_display_destroy(server.display);
         return EXIT_FAILURE;
@@ -289,9 +383,11 @@ int main(void) {
 
     wl_list_remove(&server.new_input.link);
     wl_list_remove(&server.new_output.link);
+    wl_list_remove(&server.new_toplevel.link);
     wlr_allocator_destroy(server.allocator);
     wlr_renderer_destroy(server.renderer);
     wlr_backend_destroy(server.backend);
+    wlr_scene_node_destroy(&server.scene->tree.node);
     wlr_seat_destroy(server.seat);
     wl_display_destroy(server.display);
     return 0;
