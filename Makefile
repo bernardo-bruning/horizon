@@ -15,7 +15,13 @@ horizon-tests: tests/input_test.c input.c input.h
 test: horizon-tests
 	./horizon-tests
 
+release:
+	$(MAKE) clean
+	$(CC) $(CFLAGS) -Os -DNDEBUG -U HORIZON_DEBUG $(WLR_CFLAGS) \
+		$(PIXMAN_CFLAGS) -o horizon main.c input.c $(WAYLAND_LIBS)
+	strip --strip-unneeded horizon
+
 clean:
 	rm -f horizon horizon-tests
 
-.PHONY: clean test
+.PHONY: clean release test
