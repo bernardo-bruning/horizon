@@ -11,6 +11,7 @@
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_seat.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 #include "input.h"
@@ -20,6 +21,7 @@ struct horizon_server {
     struct wlr_backend *backend;
     struct wlr_renderer *renderer;
     struct wlr_allocator *allocator;
+    struct wlr_seat *seat;
     struct wl_listener new_output;
     struct wl_listener new_input;
 };
@@ -69,6 +71,10 @@ static void handle_keyboard_destroy(struct wl_listener *listener, void *data) {
 
     struct horizon_keyboard *keyboard =
         wl_container_of(listener, keyboard, destroy);
+    if (wlr_seat_get_keyboard(keyboard->server->seat) == keyboard->keyboard) {
+        wlr_seat_set_keyboard(keyboard->server->seat, NULL);
+        wlr_seat_set_capabilities(keyboard->server->seat, 0);
+    }
     wl_list_remove(&keyboard->key.link);
     wl_list_remove(&keyboard->destroy.link);
     free(keyboard);
@@ -117,6 +123,9 @@ static void handle_new_input(struct wl_listener *listener, void *data) {
         free(keyboard);
         return;
     }
+
+    wlr_seat_set_keyboard(server->seat, keyboard->keyboard);
+    wlr_seat_set_capabilities(server->seat, WL_SEAT_CAPABILITY_KEYBOARD);
 
     keyboard->key.notify = handle_keyboard_key;
     keyboard->destroy.notify = handle_keyboard_destroy;
@@ -221,10 +230,18 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
+    server.seat = wlr_seat_create(server.display, "seat0");
+    if (server.seat == NULL) {
+        fprintf(stderr, "horizon: failed to create seat\n");
+        wl_display_destroy(server.display);
+        return EXIT_FAILURE;
+    }
+
     server.backend = wlr_backend_autocreate(
         wl_display_get_event_loop(server.display), NULL);
     if (server.backend == NULL) {
         fprintf(stderr, "horizon: failed to create wlroots backend\n");
+        wlr_seat_destroy(server.seat);
         wl_display_destroy(server.display);
         return EXIT_FAILURE;
     }
@@ -234,6 +251,7 @@ int main(void) {
         !wlr_renderer_init_wl_display(server.renderer, server.display)) {
         fprintf(stderr, "horizon: failed to initialize renderer\n");
         wlr_backend_destroy(server.backend);
+        wlr_seat_destroy(server.seat);
         wl_display_destroy(server.display);
         return EXIT_FAILURE;
     }
@@ -243,6 +261,7 @@ int main(void) {
         fprintf(stderr, "horizon: failed to create allocator\n");
         wlr_renderer_destroy(server.renderer);
         wlr_backend_destroy(server.backend);
+        wlr_seat_destroy(server.seat);
         wl_display_destroy(server.display);
         return EXIT_FAILURE;
     }
@@ -257,11 +276,13 @@ int main(void) {
         wlr_allocator_destroy(server.allocator);
         wlr_renderer_destroy(server.renderer);
         wlr_backend_destroy(server.backend);
+        wlr_seat_destroy(server.seat);
         wl_display_destroy(server.display);
         return EXIT_FAILURE;
     }
 
     printf("Hello from horizon, a Wayland compositor!\n");
+    printf("Seat ready: seat0\n");
     printf("Listening on WAYLAND_DISPLAY=%s\n", socket);
     fflush(stdout);
     wl_display_run(server.display);
@@ -271,6 +292,7 @@ int main(void) {
     wlr_allocator_destroy(server.allocator);
     wlr_renderer_destroy(server.renderer);
     wlr_backend_destroy(server.backend);
+    wlr_seat_destroy(server.seat);
     wl_display_destroy(server.display);
     return 0;
 }
