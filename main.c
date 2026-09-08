@@ -46,6 +46,7 @@ struct horizon_server {
     struct wlr_cursor *cursor;
     struct wlr_xcursor_manager *cursor_manager;
     struct wlr_output_layout *output_layout;
+    struct wlr_output *output;
     struct wlr_xcursor *cursor_image;
     struct wlr_scene_buffer *cursor_scene;
     struct wl_listener cursor_motion;
@@ -125,6 +126,9 @@ static void update_cursor_scene(struct horizon_server *server) {
         (int)server->cursor->x - (int)image->hotspot_x,
         (int)server->cursor->y - (int)image->hotspot_y);
     wlr_scene_node_raise_to_top(&server->cursor_scene->node);
+    if (server->output != NULL) {
+        wlr_output_schedule_frame(server->output);
+    }
 }
 
 static void handle_cursor_motion(struct wl_listener *listener, void *data) {
@@ -328,6 +332,7 @@ static void handle_new_output(struct wl_listener *listener, void *data) {
     struct horizon_server *server =
         wl_container_of(listener, server, new_output);
     struct wlr_output *output = data;
+    server->output = output;
 
     if (!wlr_output_init_render(output, server->allocator, server->renderer)) {
         fprintf(stderr, "horizon: failed to initialize output renderer\n");
