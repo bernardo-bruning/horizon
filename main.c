@@ -10,6 +10,7 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
@@ -40,6 +41,7 @@ struct horizon_server {
     struct wlr_renderer *renderer;
     struct wlr_allocator *allocator;
     struct wlr_compositor *compositor;
+    struct wlr_data_device_manager *data_device_manager;
     struct wlr_xdg_shell *xdg_shell;
     struct wlr_scene *scene;
     struct wlr_seat *seat;
@@ -478,6 +480,15 @@ int main(void) {
     server.seat = wlr_seat_create(server.display, "seat0");
     if (server.seat == NULL) {
         fprintf(stderr, "horizon: failed to create seat\n");
+        wl_display_destroy(server.display);
+        return EXIT_FAILURE;
+    }
+
+    /* Advertise wl_data_device_manager so clients can use clipboard and DND. */
+    server.data_device_manager = wlr_data_device_manager_create(server.display);
+    if (server.data_device_manager == NULL) {
+        fprintf(stderr, "horizon: failed to create data device manager\n");
+        wlr_seat_destroy(server.seat);
         wl_display_destroy(server.display);
         return EXIT_FAILURE;
     }
