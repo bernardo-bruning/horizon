@@ -483,19 +483,29 @@ static void handle_new_output(struct wl_listener *listener, void *data) {
 }
 
 static pid_t launch_command(char *const command[], const char *socket) {
+    /* Keep the launcher's buffered output out of the child process. */
+    fflush(NULL);
+
     pid_t pid = fork();
     if (pid != 0) {
         return pid;
     }
 
+    /* A command's diagnostics belong to the same output as its regular logs. */
+    if (dup2(STDOUT_FILENO, STDERR_FILENO) < 0) {
+        dprintf(STDOUT_FILENO, "horizon: failed to route command logs: %s\n",
+            strerror(errno));
+        _exit(127);
+    }
+
     if (setenv("WAYLAND_DISPLAY", socket, 1) != 0) {
-        fprintf(stderr, "horizon: failed to set WAYLAND_DISPLAY: %s\n",
+        dprintf(STDOUT_FILENO, "horizon: failed to set WAYLAND_DISPLAY: %s\n",
             strerror(errno));
         _exit(127);
     }
 
     execvp(command[0], command);
-    fprintf(stderr, "horizon: failed to execute %s: %s\n",
+    dprintf(STDOUT_FILENO, "horizon: failed to execute %s: %s\n",
         command[0], strerror(errno));
     _exit(127);
 }
