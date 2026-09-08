@@ -1,6 +1,14 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <errno.h>
+#include <signal.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <wayland-server-core.h>
 
@@ -474,7 +482,64 @@ static void handle_new_output(struct wl_listener *listener, void *data) {
     wlr_output_schedule_frame(output);
 }
 
-int main(void) {
+static pid_t launch_command(char *const command[], const char *socket) {
+    pid_t pid = fork();
+    if (pid != 0) {
+        return pid;
+    }
+
+    if (setenv("WAYLAND_DISPLAY", socket, 1) != 0) {
+        fprintf(stderr, "horizon: failed to set WAYLAND_DISPLAY: %s\n",
+            strerror(errno));
+        _exit(127);
+    }
+
+    execvp(command[0], command);
+    fprintf(stderr, "horizon: failed to execute %s: %s\n",
+        command[0], strerror(errno));
+    _exit(127);
+}
+
+static int wait_for_command(pid_t pid) {
+    int status;
+    pid_t result;
+
+    do {
+        result = waitpid(pid, &status, WNOHANG);
+    } while (result < 0 && errno == EINTR);
+
+    if (result == 0) {
+        /* Ctrl+Alt+Backspace ends the compositor and its hosted program. */
+        if (kill(pid, SIGTERM) != 0 && errno != ESRCH) {
+            fprintf(stderr, "horizon: failed to stop command: %s\n",
+                strerror(errno));
+        }
+        do {
+            result = waitpid(pid, &status, 0);
+        } while (result < 0 && errno == EINTR);
+    }
+
+    if (result < 0) {
+        fprintf(stderr, "horizon: failed to wait for command: %s\n",
+            strerror(errno));
+        return EXIT_FAILURE;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return EXIT_FAILURE;
+}
+
+int main(int argc, char *argv[]) {
+    char *const *command = NULL;
+    if (argc > 1) {
+        if (strcmp(argv[1], "--") != 0 || argc == 2) {
+            fprintf(stderr, "Usage: %s [-- command [args...]]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        command = &argv[2];
+    }
+
     struct horizon_server server = {0};
     server.display = wl_display_create();
     if (server.display == NULL) {
@@ -618,6 +683,16 @@ int main(void) {
     printf("Seat ready: seat0\n");
     printf("Listening on WAYLAND_DISPLAY=%s\n", socket);
     fflush(stdout);
+
+    pid_t command_pid = -1;
+    if (command != NULL) {
+        command_pid = launch_command(command, socket);
+        if (command_pid < 0) {
+            fprintf(stderr, "horizon: failed to launch command: %s\n",
+                strerror(errno));
+            wl_display_terminate(server.display);
+        }
+    }
     wl_display_run(server.display);
 
     wl_list_remove(&server.new_input.link);
@@ -634,5 +709,9 @@ int main(void) {
     wlr_output_layout_destroy(server.output_layout);
     wlr_seat_destroy(server.seat);
     wl_display_destroy(server.display);
-    return 0;
+
+    if (command_pid >= 0) {
+        return wait_for_command(command_pid);
+    }
+    return command != NULL ? EXIT_FAILURE : EXIT_SUCCESS;
 }
