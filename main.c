@@ -61,6 +61,8 @@ struct horizon_server {
     struct wlr_output *output;
     struct wlr_xcursor *cursor_image;
     struct wlr_scene_buffer *cursor_scene;
+    struct horizon_xdg_toplevel *focused_view;
+    struct horizon_xdg_toplevel *pointer_view;
     struct wl_listener cursor_motion;
     struct wl_listener cursor_motion_absolute;
     struct wl_listener new_output;
@@ -79,6 +81,7 @@ struct horizon_xdg_toplevel {
     struct wlr_xdg_toplevel *toplevel;
     struct wlr_scene_tree *scene_tree;
     bool configured;
+    struct horizon_server *server;
     struct wl_listener map;
     struct wl_listener unmap;
     struct wl_listener commit;
@@ -97,8 +100,86 @@ struct horizon_pointer {
     struct horizon_server *server;
     struct wl_listener motion;
     struct wl_listener motion_absolute;
+    struct wl_listener button;
     struct wl_listener destroy;
 };
+
+static struct horizon_xdg_toplevel *view_at(
+    struct horizon_server *server, double *sx, double *sy) {
+    struct wlr_scene_node *node = wlr_scene_node_at(
+        &server->scene->tree.node, server->cursor->x, server->cursor->y,
+        sx, sy);
+
+    while (node != NULL) {
+        if (node->data != NULL) {
+            return node->data;
+        }
+        node = node->parent != NULL ? &node->parent->node : NULL;
+    }
+
+    return NULL;
+}
+
+static bool cursor_accepts_input(struct wlr_scene_buffer *buffer,
+    double *sx, double *sy) {
+    (void)buffer;
+    (void)sx;
+    (void)sy;
+    return false;
+}
+
+static void focus_view(struct horizon_server *server,
+    struct horizon_xdg_toplevel *view, double sx, double sy) {
+    if (server->focused_view == view) {
+        return;
+    }
+
+    HORIZON_DEBUG_LOG("focus changed: %s -> %s",
+        server->focused_view != NULL &&
+            server->focused_view->toplevel->title != NULL ?
+            server->focused_view->toplevel->title : "none",
+        view != NULL && view->toplevel->title != NULL ?
+            view->toplevel->title : "none");
+
+    if (server->focused_view != NULL) {
+        wlr_xdg_toplevel_set_activated(
+            server->focused_view->toplevel, false);
+    }
+    server->focused_view = view;
+
+    if (view == NULL) {
+        wlr_seat_keyboard_notify_clear_focus(server->seat);
+        wlr_seat_pointer_notify_clear_focus(server->seat);
+        return;
+    }
+
+    wlr_xdg_toplevel_set_activated(view->toplevel, true);
+    struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(server->seat);
+    if (keyboard != NULL) {
+        wlr_seat_keyboard_notify_enter(server->seat,
+            view->toplevel->base->surface,
+            keyboard->keycodes, keyboard->num_keycodes,
+            &keyboard->modifiers);
+    }
+    wlr_seat_pointer_notify_enter(server->seat,
+        view->toplevel->base->surface, sx, sy);
+}
+
+static void update_pointer_focus(struct horizon_server *server,
+    uint32_t time_msec) {
+    double sx = 0, sy = 0;
+    struct horizon_xdg_toplevel *view = view_at(server, &sx, &sy);
+
+    if (view != server->pointer_view) {
+        server->pointer_view = view;
+        focus_view(server, view, sx, sy);
+    }
+
+    if (view != NULL) {
+        wlr_seat_pointer_notify_motion(server->seat, time_msec, sx, sy);
+    }
+    wlr_seat_pointer_notify_frame(server->seat);
+}
 
 static bool configure_keyboard(struct wlr_keyboard *keyboard) {
     struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -172,6 +253,7 @@ static void handle_pointer_motion(struct wl_listener *listener, void *data) {
     wlr_cursor_move(pointer->server->cursor, &pointer->pointer->base,
         event->delta_x, event->delta_y);
     update_cursor_scene(pointer->server);
+    update_pointer_focus(pointer->server, event->time_msec);
 }
 
 static void handle_pointer_motion_absolute(struct wl_listener *listener, void *data) {
@@ -181,6 +263,17 @@ static void handle_pointer_motion_absolute(struct wl_listener *listener, void *d
     wlr_cursor_warp_absolute(pointer->server->cursor, &pointer->pointer->base,
         event->x, event->y);
     update_cursor_scene(pointer->server);
+    update_pointer_focus(pointer->server, event->time_msec);
+}
+
+static void handle_pointer_button(struct wl_listener *listener, void *data) {
+    struct horizon_pointer *pointer =
+        wl_container_of(listener, pointer, button);
+    struct wlr_pointer_button_event *event = data;
+
+    wlr_seat_pointer_notify_button(pointer->server->seat,
+        event->time_msec, event->button, event->state);
+    wlr_seat_pointer_notify_frame(pointer->server->seat);
 }
 
 static void handle_pointer_destroy(struct wl_listener *listener, void *data) {
@@ -189,6 +282,7 @@ static void handle_pointer_destroy(struct wl_listener *listener, void *data) {
         wl_container_of(listener, pointer, destroy);
     wl_list_remove(&pointer->motion.link);
     wl_list_remove(&pointer->motion_absolute.link);
+    wl_list_remove(&pointer->button.link);
     wl_list_remove(&pointer->destroy.link);
     free(pointer);
 }
@@ -213,6 +307,8 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
     struct wlr_keyboard_key_event *event = data;
 
     if (event->state != WL_KEYBOARD_KEY_STATE_PRESSED) {
+        wlr_seat_keyboard_notify_key(horizon_keyboard->server->seat,
+            event->time_msec, event->keycode, event->state);
         return;
     }
 
@@ -229,6 +325,11 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
         return;
     }
 
+    wlr_seat_keyboard_notify_key(horizon_keyboard->server->seat,
+        event->time_msec, event->keycode, event->state);
+    wlr_seat_keyboard_notify_modifiers(horizon_keyboard->server->seat,
+        &horizon_keyboard->keyboard->modifiers);
+
     unsigned vt = horizon_vt_shortcut(event->keycode, modifiers, keysym);
     if (vt == 0 || horizon_keyboard->server->session == NULL) {
         return;
@@ -244,12 +345,13 @@ static void handle_xdg_map(struct wl_listener *listener, void *data) {
 
     struct horizon_xdg_toplevel *view =
         wl_container_of(listener, view, map);
-    wlr_xdg_toplevel_set_activated(view->toplevel, true);
+    wlr_xdg_toplevel_set_activated(view->toplevel, false);
     HORIZON_DEBUG_LOG("xdg map: title=%s", view->toplevel->title != NULL ?
         view->toplevel->title : "untitled");
     printf("XDG toplevel mapped: %s\n",
         view->toplevel->title != NULL ? view->toplevel->title : "untitled");
     fflush(stdout);
+    update_pointer_focus(view->server, 0);
 }
 
 static void handle_xdg_unmap(struct wl_listener *listener, void *data) {
@@ -257,6 +359,13 @@ static void handle_xdg_unmap(struct wl_listener *listener, void *data) {
 
     struct horizon_xdg_toplevel *view =
         wl_container_of(listener, view, unmap);
+    if (view->server->pointer_view == view) {
+        view->server->pointer_view = NULL;
+    }
+    if (view->server->focused_view == view) {
+        focus_view(view->server, NULL, 0, 0);
+    }
+    update_pointer_focus(view->server, 0);
     HORIZON_DEBUG_LOG("xdg unmap: title=%s", view->toplevel->title != NULL ?
         view->toplevel->title : "untitled");
 }
@@ -273,7 +382,7 @@ static void handle_xdg_commit(struct wl_listener *listener, void *data) {
 
     if (!view->configured && view->toplevel->base->initialized) {
         wlr_xdg_toplevel_set_size(view->toplevel, 800, 600);
-        wlr_xdg_toplevel_set_activated(view->toplevel, true);
+        wlr_xdg_toplevel_set_activated(view->toplevel, false);
         view->configured = true;
         HORIZON_DEBUG_LOG("xdg initial configure sent: size=800x600");
     }
@@ -284,6 +393,12 @@ static void handle_xdg_destroy(struct wl_listener *listener, void *data) {
 
     struct horizon_xdg_toplevel *view =
         wl_container_of(listener, view, destroy);
+    if (view->server->focused_view == view) {
+        focus_view(view->server, NULL, 0, 0);
+    }
+    if (view->server->pointer_view == view) {
+        view->server->pointer_view = NULL;
+    }
     HORIZON_DEBUG_LOG("xdg destroy");
     wl_list_remove(&view->map.link);
     wl_list_remove(&view->unmap.link);
@@ -304,6 +419,7 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
     }
 
     view->toplevel = toplevel;
+    view->server = server;
     view->scene_tree = wlr_scene_xdg_surface_create(
         &server->scene->tree, toplevel->base);
     if (view->scene_tree == NULL) {
@@ -312,6 +428,7 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
         return;
     }
     wlr_scene_node_set_position(&view->scene_tree->node, 80, 80);
+    view->scene_tree->node.data = view;
 
     view->map.notify = handle_xdg_map;
     view->unmap.notify = handle_xdg_unmap;
@@ -343,10 +460,12 @@ static void handle_new_input(struct wl_listener *listener, void *data) {
         pointer->pointer = wlr_pointer_from_input_device(device);
         pointer->motion.notify = handle_pointer_motion;
         pointer->motion_absolute.notify = handle_pointer_motion_absolute;
+        pointer->button.notify = handle_pointer_button;
         pointer->destroy.notify = handle_pointer_destroy;
         wl_signal_add(&pointer->pointer->events.motion, &pointer->motion);
         wl_signal_add(&pointer->pointer->events.motion_absolute,
             &pointer->motion_absolute);
+        wl_signal_add(&pointer->pointer->events.button, &pointer->button);
         wl_signal_add(&device->events.destroy, &pointer->destroy);
         update_seat_capabilities(server);
         HORIZON_DEBUG_LOG("pointer attached: %s", device->name);
@@ -468,6 +587,8 @@ static void handle_new_output(struct wl_listener *listener, void *data) {
         if (server->cursor_scene == NULL) {
             fprintf(stderr, "horizon: failed to create software cursor scene\n");
         } else {
+            server->cursor_scene->point_accepts_input =
+                cursor_accepts_input;
             update_cursor_scene(server);
             wlr_scene_node_raise_to_top(&server->cursor_scene->node);
         }
