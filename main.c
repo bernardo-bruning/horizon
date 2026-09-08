@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <wayland-server-core.h>
@@ -22,6 +23,7 @@
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_keyboard_group.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_pointer.h>
@@ -30,9 +32,11 @@
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 #include "input.h"
+#include "decorator.h"
 
 #ifdef HORIZON_DEBUG
 #define HORIZON_DEBUG_LOG(...) do { \
@@ -53,8 +57,10 @@ struct horizon_server {
     struct wlr_compositor *compositor;
     struct wlr_data_device_manager *data_device_manager;
     struct wlr_xdg_shell *xdg_shell;
+    struct wlr_xdg_decoration_manager_v1 *xdg_decoration_manager;
     struct wlr_scene *scene;
     struct wlr_seat *seat;
+    struct wlr_keyboard_group *keyboard_group;
     struct wlr_cursor *cursor;
     struct wlr_xcursor_manager *cursor_manager;
     struct wlr_output_layout *output_layout;
@@ -64,11 +70,14 @@ struct horizon_server {
     struct wl_list views;
     struct horizon_xdg_toplevel *focused_view;
     struct horizon_xdg_toplevel *pointer_view;
+    struct wl_listener keyboard_key;
+    struct wl_listener keyboard_modifiers;
     struct wl_listener cursor_motion;
     struct wl_listener cursor_motion_absolute;
     struct wl_listener new_output;
     struct wl_listener new_input;
     struct wl_listener new_toplevel;
+    struct wl_listener new_toplevel_decoration;
 };
 
 struct horizon_output {
@@ -81,19 +90,59 @@ struct horizon_output {
 struct horizon_xdg_toplevel {
     struct wlr_xdg_toplevel *toplevel;
     struct wlr_scene_tree *scene_tree;
+    struct horizon_decorator *decorator;
     bool configured;
+    bool fullscreen;
     struct horizon_server *server;
     struct wl_list link;
     struct wl_listener map;
     struct wl_listener unmap;
     struct wl_listener commit;
+    struct wl_listener request_fullscreen;
     struct wl_listener destroy;
 };
 
+#define HORIZON_BORDER_WIDTH 2
+
+static void update_view_layout(struct horizon_xdg_toplevel *view) {
+    int width = 800;
+    int height = 600;
+    int x = 80;
+    int y = 80;
+
+    if (view->fullscreen && view->server->output != NULL) {
+        width = view->server->output->width;
+        height = view->server->output->height;
+        x = 0;
+        y = 0;
+    } else if (view->toplevel->current.width > 0 &&
+        view->toplevel->current.height > 0) {
+        width = view->toplevel->current.width;
+        height = view->toplevel->current.height;
+    }
+
+    wlr_scene_node_set_position(&view->scene_tree->node, x, y);
+    horizon_decorator_update(view->decorator, x, y, width, height);
+}
+
+static void configure_view_decoration(struct horizon_xdg_toplevel *view) {
+    if (view->server->xdg_decoration_manager == NULL ||
+        !view->toplevel->base->initialized) {
+        return;
+    }
+
+    struct wlr_xdg_toplevel_decoration_v1 *decoration;
+    wl_list_for_each(decoration,
+        &view->server->xdg_decoration_manager->decorations, link) {
+        if (decoration->toplevel == view->toplevel) {
+            wlr_xdg_toplevel_decoration_v1_set_mode(decoration,
+                WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+        }
+    }
+}
+
 struct horizon_keyboard {
     struct wlr_keyboard *keyboard;
-    struct wl_listener key;
-    struct wl_listener modifiers;
     struct wl_listener destroy;
     struct horizon_server *server;
 };
@@ -267,6 +316,22 @@ static void update_seat_capabilities(struct horizon_server *server) {
     wlr_seat_set_capabilities(server->seat, capabilities);
 }
 
+static void destroy_keyboard_group(struct horizon_server *server) {
+    if (server->keyboard_group == NULL) {
+        return;
+    }
+
+    if (wlr_seat_get_keyboard(server->seat) ==
+        &server->keyboard_group->keyboard) {
+        wlr_seat_set_keyboard(server->seat, NULL);
+        update_seat_capabilities(server);
+    }
+    wl_list_remove(&server->keyboard_key.link);
+    wl_list_remove(&server->keyboard_modifiers.link);
+    wlr_keyboard_group_destroy(server->keyboard_group);
+    server->keyboard_group = NULL;
+}
+
 static void update_cursor_scene(struct horizon_server *server) {
     if (server->cursor_scene == NULL || server->cursor_image == NULL ||
         server->cursor_image->image_count == 0) {
@@ -356,61 +421,74 @@ static void handle_keyboard_destroy(struct wl_listener *listener, void *data) {
 
     struct horizon_keyboard *keyboard =
         wl_container_of(listener, keyboard, destroy);
-    if (wlr_seat_get_keyboard(keyboard->server->seat) == keyboard->keyboard) {
+    struct wlr_keyboard_group *group = keyboard->server->keyboard_group;
+    if (group != NULL && keyboard->keyboard->group == group) {
+        wlr_keyboard_group_remove_keyboard(group, keyboard->keyboard);
+    }
+    if (group != NULL && wl_list_empty(&group->devices) &&
+        wlr_seat_get_keyboard(keyboard->server->seat) == &group->keyboard) {
         wlr_seat_set_keyboard(keyboard->server->seat, NULL);
         update_seat_capabilities(keyboard->server);
     }
-    wl_list_remove(&keyboard->key.link);
-    wl_list_remove(&keyboard->modifiers.link);
     wl_list_remove(&keyboard->destroy.link);
     free(keyboard);
 }
 
 static void handle_keyboard_modifiers(struct wl_listener *listener, void *data) {
     (void)data;
-    struct horizon_keyboard *keyboard =
-        wl_container_of(listener, keyboard, modifiers);
+    struct horizon_server *server =
+        wl_container_of(listener, server, keyboard_modifiers);
 
-    wlr_seat_keyboard_notify_modifiers(keyboard->server->seat,
-        &keyboard->keyboard->modifiers);
+    wlr_seat_keyboard_notify_modifiers(server->seat,
+        &server->keyboard_group->keyboard.modifiers);
 }
 
 static void handle_keyboard_key(struct wl_listener *listener, void *data) {
-    struct horizon_keyboard *horizon_keyboard =
-        wl_container_of(listener, horizon_keyboard, key);
+    struct horizon_server *server =
+        wl_container_of(listener, server, keyboard_key);
     struct wlr_keyboard_key_event *event = data;
+    struct wlr_keyboard *keyboard = &server->keyboard_group->keyboard;
 
-    HORIZON_DEBUG_LOG("keyboard key: keycode=%u state=%u focused=%s",
+    HORIZON_DEBUG_LOG(
+        "keyboard group event: keycode=%u state=%u modifiers=0x%x focused=%s",
         event->keycode, event->state,
-        view_title(horizon_keyboard->server->focused_view));
+        wlr_keyboard_get_modifiers(keyboard),
+        view_title(server->focused_view));
 
     if (event->state != WL_KEYBOARD_KEY_STATE_PRESSED) {
-        wlr_seat_keyboard_notify_key(horizon_keyboard->server->seat,
+        wlr_seat_keyboard_notify_key(server->seat,
             event->time_msec, event->keycode, event->state);
         return;
     }
 
-    uint32_t modifiers = wlr_keyboard_get_modifiers(horizon_keyboard->keyboard);
+    uint32_t modifiers = wlr_keyboard_get_modifiers(keyboard);
     xkb_keysym_t keysym = XKB_KEY_NoSymbol;
-    if (horizon_keyboard->keyboard->xkb_state != NULL) {
+    if (keyboard->xkb_state != NULL) {
         keysym = xkb_state_key_get_one_sym(
-            horizon_keyboard->keyboard->xkb_state, event->keycode + 8);
+            keyboard->xkb_state, event->keycode + 8);
     }
+    char keysym_name[64] = "unknown";
+    char utf8[8] = {0};
+    xkb_keysym_get_name(keysym, keysym_name, sizeof(keysym_name));
+    xkb_keysym_to_utf8(keysym, utf8, sizeof(utf8));
+    HORIZON_DEBUG_LOG(
+        "keyboard translation: keycode=%u keysym=0x%x name=%s utf8=%s",
+        event->keycode, keysym, keysym_name, utf8);
     if (horizon_exit_shortcut_pressed(event->keycode, modifiers, keysym)) {
         printf("Exiting horizon (Ctrl+Alt+Backspace)\n");
         fflush(stdout);
-        wl_display_terminate(horizon_keyboard->server->display);
+        wl_display_terminate(server->display);
         return;
     }
 
-    wlr_seat_keyboard_notify_key(horizon_keyboard->server->seat,
+    wlr_seat_keyboard_notify_key(server->seat,
         event->time_msec, event->keycode, event->state);
     unsigned vt = horizon_vt_shortcut(event->keycode, modifiers, keysym);
-    if (vt == 0 || horizon_keyboard->server->session == NULL) {
+    if (vt == 0 || server->session == NULL) {
         return;
     }
 
-    if (!wlr_session_change_vt(horizon_keyboard->server->session, vt)) {
+    if (!wlr_session_change_vt(server->session, vt)) {
         fprintf(stderr, "horizon: failed to switch to VT%u\n", vt);
     }
 }
@@ -428,6 +506,16 @@ static void handle_xdg_map(struct wl_listener *listener, void *data) {
     fflush(stdout);
     update_pointer_focus(view->server, 0);
     focus_initial_view(view->server, view);
+}
+
+static void handle_new_toplevel_decoration(struct wl_listener *listener,
+    void *data) {
+    (void)listener;
+    struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
+    if (decoration->toplevel->base->initialized) {
+        wlr_xdg_toplevel_decoration_v1_set_mode(decoration,
+            WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    }
 }
 
 static void handle_xdg_unmap(struct wl_listener *listener, void *data) {
@@ -456,11 +544,42 @@ static void handle_xdg_commit(struct wl_listener *listener, void *data) {
         view->toplevel->base->surface->mapped);
 
     if (!view->configured && view->toplevel->base->initialized) {
-        wlr_xdg_toplevel_set_size(view->toplevel, 800, 600);
+        configure_view_decoration(view);
+        if (view->toplevel->requested.fullscreen) {
+            view->fullscreen = true;
+            wlr_xdg_toplevel_set_fullscreen(view->toplevel, true);
+        }
+        wlr_xdg_toplevel_set_size(view->toplevel,
+            view->fullscreen && view->server->output != NULL ?
+                view->server->output->width : 800,
+            view->fullscreen && view->server->output != NULL ?
+                view->server->output->height : 600);
         wlr_xdg_toplevel_set_activated(view->toplevel, false);
         view->configured = true;
-        HORIZON_DEBUG_LOG("xdg initial configure sent: size=800x600");
+        HORIZON_DEBUG_LOG("xdg initial configure sent: fullscreen=%d size=%dx%d",
+            view->fullscreen,
+            view->fullscreen && view->server->output != NULL ?
+                view->server->output->width : 800,
+            view->fullscreen && view->server->output != NULL ?
+                view->server->output->height : 600);
     }
+    update_view_layout(view);
+}
+
+static void handle_xdg_request_fullscreen(struct wl_listener *listener,
+    void *data) {
+    (void)data;
+    struct horizon_xdg_toplevel *view =
+        wl_container_of(listener, view, request_fullscreen);
+    view->fullscreen = view->toplevel->requested.fullscreen;
+    wlr_xdg_toplevel_set_fullscreen(view->toplevel, view->fullscreen);
+    if (view->fullscreen && view->server->output != NULL) {
+        wlr_xdg_toplevel_set_size(view->toplevel,
+            view->server->output->width, view->server->output->height);
+    } else {
+        wlr_xdg_toplevel_set_size(view->toplevel, 800, 600);
+    }
+    update_view_layout(view);
 }
 
 static void handle_xdg_destroy(struct wl_listener *listener, void *data) {
@@ -478,8 +597,10 @@ static void handle_xdg_destroy(struct wl_listener *listener, void *data) {
     wl_list_remove(&view->map.link);
     wl_list_remove(&view->unmap.link);
     wl_list_remove(&view->commit.link);
+    wl_list_remove(&view->request_fullscreen.link);
     wl_list_remove(&view->destroy.link);
     wl_list_remove(&view->link);
+    horizon_decorator_destroy(view->decorator);
     free(view);
 }
 
@@ -503,18 +624,31 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
         free(view);
         return;
     }
-    wlr_scene_node_set_position(&view->scene_tree->node, 80, 80);
+    const float border_color[] = { 0.25f, 0.55f, 0.95f, 1.0f };
+    view->decorator = horizon_decorator_create(&server->scene->tree,
+        HORIZON_BORDER_WIDTH, border_color);
+    if (view->decorator == NULL) {
+        fprintf(stderr, "horizon: failed to create window decorator\n");
+        wlr_scene_node_destroy(&view->scene_tree->node);
+        free(view);
+        return;
+    }
+    view->fullscreen = toplevel->requested.fullscreen;
+    update_view_layout(view);
     view->scene_tree->node.data = view;
     wl_list_insert(&server->views, &view->link);
 
     view->map.notify = handle_xdg_map;
     view->unmap.notify = handle_xdg_unmap;
     view->commit.notify = handle_xdg_commit;
+    view->request_fullscreen.notify = handle_xdg_request_fullscreen;
     view->destroy.notify = handle_xdg_destroy;
     wl_signal_add(&toplevel->base->surface->events.map, &view->map);
     wl_signal_add(&toplevel->base->surface->events.unmap, &view->unmap);
     wl_signal_add(&toplevel->base->surface->events.commit, &view->commit);
-    wl_signal_add(&toplevel->base->events.destroy, &view->destroy);
+    wl_signal_add(&toplevel->events.request_fullscreen,
+        &view->request_fullscreen);
+    wl_signal_add(&toplevel->events.destroy, &view->destroy);
 
     printf("XDG toplevel ready: %s\n",
         toplevel->title != NULL ? toplevel->title : "untitled");
@@ -571,16 +705,55 @@ static void handle_new_input(struct wl_listener *listener, void *data) {
         return;
     }
 
-    wlr_seat_set_keyboard(server->seat, keyboard->keyboard);
-    update_seat_capabilities(server);
-    enter_keyboard_focus(server, server->focused_view);
-    HORIZON_DEBUG_LOG("keyboard attached: %s", device->name);
+    if (server->keyboard_group == NULL) {
+        server->keyboard_group = wlr_keyboard_group_create();
+        if (server->keyboard_group == NULL) {
+            fprintf(stderr, "horizon: failed to create keyboard group\n");
+            free(keyboard);
+            return;
+        }
+        server->keyboard_key.notify = handle_keyboard_key;
+        server->keyboard_modifiers.notify = handle_keyboard_modifiers;
+        wl_signal_add(&server->keyboard_group->keyboard.events.key,
+            &server->keyboard_key);
+        wl_signal_add(&server->keyboard_group->keyboard.events.modifiers,
+            &server->keyboard_modifiers);
+    }
 
-    keyboard->key.notify = handle_keyboard_key;
-    keyboard->modifiers.notify = handle_keyboard_modifiers;
+    if (server->keyboard_group->keyboard.keymap == NULL) {
+        if (!wlr_keyboard_set_keymap(
+                &server->keyboard_group->keyboard,
+                keyboard->keyboard->keymap)) {
+            fprintf(stderr, "horizon: failed to set keyboard group keymap\n");
+            free(keyboard);
+            return;
+        }
+        wlr_keyboard_set_repeat_info(
+            &server->keyboard_group->keyboard,
+            keyboard->keyboard->repeat_info.rate,
+            keyboard->keyboard->repeat_info.delay);
+        HORIZON_DEBUG_LOG("keyboard group initialized from: %s",
+            device->name);
+    }
+
+    if (!wlr_keyboard_group_add_keyboard(
+            server->keyboard_group, keyboard->keyboard)) {
+        fprintf(stderr, "horizon: failed to add keyboard to group: %s\n",
+            device->name);
+        free(keyboard);
+        return;
+    }
+
+    if (wlr_seat_get_keyboard(server->seat) == NULL) {
+        wlr_seat_set_keyboard(server->seat,
+            &server->keyboard_group->keyboard);
+        update_seat_capabilities(server);
+        enter_keyboard_focus(server, server->focused_view);
+    }
+
+    HORIZON_DEBUG_LOG("keyboard added to group: %s", device->name);
+
     keyboard->destroy.notify = handle_keyboard_destroy;
-    wl_signal_add(&keyboard->keyboard->events.key, &keyboard->key);
-    wl_signal_add(&keyboard->keyboard->events.modifiers, &keyboard->modifiers);
     wl_signal_add(&device->events.destroy, &keyboard->destroy);
 }
 
@@ -589,9 +762,28 @@ static void render_frame(struct wl_listener *listener, void *data) {
 
     struct horizon_output *horizon_output =
         wl_container_of(listener, horizon_output, frame);
-    if (!wlr_scene_output_commit(horizon_output->scene_output, NULL)) {
+    HORIZON_DEBUG_LOG(
+        "[DEBUG-render] output frame: name=%s size=%dx%d",
+        horizon_output->output->name,
+        horizon_output->output->width,
+        horizon_output->output->height);
+
+    bool committed = wlr_scene_output_commit(
+        horizon_output->scene_output, NULL);
+    HORIZON_DEBUG_LOG(
+        "[DEBUG-render] output frame commit: name=%s result=%d",
+        horizon_output->output->name, committed);
+    if (!committed) {
         fprintf(stderr, "horizon: failed to commit output frame\n");
+        return;
     }
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    wlr_scene_output_send_frame_done(horizon_output->scene_output, &now);
+    HORIZON_DEBUG_LOG(
+        "[DEBUG-render] frame done sent: name=%s",
+        horizon_output->output->name);
 }
 
 static void handle_output_destroy(struct wl_listener *listener, void *data) {
@@ -842,8 +1034,11 @@ int main(int argc, char *argv[]) {
     }
 
     server.xdg_shell = wlr_xdg_shell_create(server.display, 3);
+    server.xdg_decoration_manager =
+        wlr_xdg_decoration_manager_v1_create(server.display);
     server.scene = wlr_scene_create();
-    if (server.xdg_shell == NULL || server.scene == NULL) {
+    if (server.xdg_shell == NULL ||
+        server.xdg_decoration_manager == NULL || server.scene == NULL) {
         fprintf(stderr, "horizon: failed to create xdg-shell scene\n");
         if (server.scene != NULL) {
             wlr_scene_node_destroy(&server.scene->tree.node);
@@ -877,6 +1072,9 @@ int main(int argc, char *argv[]) {
     wl_signal_add(&server.backend->events.new_input, &server.new_input);
     server.new_toplevel.notify = handle_new_toplevel;
     wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_toplevel);
+    server.new_toplevel_decoration.notify = handle_new_toplevel_decoration;
+    wl_signal_add(&server.xdg_decoration_manager->events.new_toplevel_decoration,
+        &server.new_toplevel_decoration);
     server.cursor_motion.notify = handle_cursor_motion;
     wl_signal_add(&server.cursor->events.motion, &server.cursor_motion);
     server.cursor_motion_absolute.notify = handle_cursor_motion_absolute;
@@ -889,6 +1087,7 @@ int main(int argc, char *argv[]) {
         wlr_renderer_destroy(server.renderer);
         wlr_backend_destroy(server.backend);
         wlr_scene_node_destroy(&server.scene->tree.node);
+        destroy_keyboard_group(&server);
         wlr_xcursor_manager_destroy(server.cursor_manager);
         wlr_cursor_destroy(server.cursor);
         wlr_output_layout_destroy(server.output_layout);
@@ -916,12 +1115,14 @@ int main(int argc, char *argv[]) {
     wl_list_remove(&server.new_input.link);
     wl_list_remove(&server.new_output.link);
     wl_list_remove(&server.new_toplevel.link);
+    wl_list_remove(&server.new_toplevel_decoration.link);
     wl_list_remove(&server.cursor_motion.link);
     wl_list_remove(&server.cursor_motion_absolute.link);
     wlr_allocator_destroy(server.allocator);
     wlr_renderer_destroy(server.renderer);
     wlr_backend_destroy(server.backend);
     wlr_scene_node_destroy(&server.scene->tree.node);
+    destroy_keyboard_group(&server);
     wlr_xcursor_manager_destroy(server.cursor_manager);
     wlr_cursor_destroy(server.cursor);
     wlr_output_layout_destroy(server.output_layout);
