@@ -5,6 +5,7 @@
 #include <wayland-server-core.h>
 
 #include <wlr/backend.h>
+#include <wlr/backend/session.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/pass.h>
 #include <wlr/render/wlr_renderer.h>
@@ -38,6 +39,7 @@
 struct horizon_server {
     struct wl_display *display;
     struct wlr_backend *backend;
+    struct wlr_session *session;
     struct wlr_renderer *renderer;
     struct wlr_allocator *allocator;
     struct wlr_compositor *compositor;
@@ -216,6 +218,16 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
         printf("Exiting horizon (Ctrl+Alt+Backspace)\n");
         fflush(stdout);
         wl_display_terminate(horizon_keyboard->server->display);
+        return;
+    }
+
+    unsigned vt = horizon_vt_shortcut(event->keycode, modifiers, keysym);
+    if (vt == 0 || horizon_keyboard->server->session == NULL) {
+        return;
+    }
+
+    if (!wlr_session_change_vt(horizon_keyboard->server->session, vt)) {
+        fprintf(stderr, "horizon: failed to switch to VT%u\n", vt);
     }
 }
 
@@ -508,7 +520,7 @@ int main(void) {
     }
 
     server.backend = wlr_backend_autocreate(
-        wl_display_get_event_loop(server.display), NULL);
+        wl_display_get_event_loop(server.display), &server.session);
     if (server.backend == NULL) {
         fprintf(stderr, "horizon: failed to create wlroots backend\n");
         wlr_seat_destroy(server.seat);

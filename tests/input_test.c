@@ -44,12 +44,38 @@ static void test_exit_shortcut_rejects_other_keys(void) {
         XKB_KEY_Return));
 }
 
+static void test_vt_shortcuts_map_function_keys(void) {
+    assert(horizon_vt_shortcut(
+        KEY_F1, WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT, XKB_KEY_F1) == 1);
+    assert(horizon_vt_shortcut(
+        KEY_F12, WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT, XKB_KEY_F12) == 12);
+}
+
+static void test_vt_shortcuts_accept_extra_modifiers(void) {
+    assert(horizon_vt_shortcut(
+        KEY_F3,
+        WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT | WLR_MODIFIER_CAPS,
+        XKB_KEY_F3) == 3);
+}
+
+static void test_vt_shortcuts_reject_invalid_combinations(void) {
+    assert(horizon_vt_shortcut(
+        KEY_F1, WLR_MODIFIER_CTRL, XKB_KEY_F1) == 0);
+    assert(horizon_vt_shortcut(
+        KEY_ENTER, WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT, XKB_KEY_Return) == 0);
+    assert(horizon_vt_shortcut(
+        KEY_F1, WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT, XKB_KEY_NoSymbol) == 1);
+}
+
 int main(void) {
     test_exit_shortcut_accepts_physical_backspace();
     test_exit_shortcut_accepts_backspace_keysym();
     test_exit_shortcut_allows_other_modifiers();
     test_exit_shortcut_rejects_missing_modifiers();
     test_exit_shortcut_rejects_other_keys();
+    test_vt_shortcuts_map_function_keys();
+    test_vt_shortcuts_accept_extra_modifiers();
+    test_vt_shortcuts_reject_invalid_combinations();
     puts("input tests: ok");
     return 0;
 }
