@@ -80,6 +80,14 @@ struct horizon_keyboard {
     struct horizon_server *server;
 };
 
+struct horizon_pointer {
+    struct wlr_pointer *pointer;
+    struct horizon_server *server;
+    struct wl_listener motion;
+    struct wl_listener motion_absolute;
+    struct wl_listener destroy;
+};
+
 static bool configure_keyboard(struct wlr_keyboard *keyboard) {
     struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (context == NULL) {
@@ -143,6 +151,32 @@ static void handle_cursor_motion_absolute(struct wl_listener *listener, void *da
     struct horizon_server *server =
         wl_container_of(listener, server, cursor_motion_absolute);
     update_cursor_scene(server);
+}
+
+static void handle_pointer_motion(struct wl_listener *listener, void *data) {
+    struct horizon_pointer *pointer =
+        wl_container_of(listener, pointer, motion);
+    struct wlr_pointer_motion_event *event = data;
+    wlr_cursor_move(pointer->server->cursor, &pointer->pointer->base,
+        event->delta_x, event->delta_y);
+}
+
+static void handle_pointer_motion_absolute(struct wl_listener *listener, void *data) {
+    struct horizon_pointer *pointer =
+        wl_container_of(listener, pointer, motion_absolute);
+    struct wlr_pointer_motion_absolute_event *event = data;
+    wlr_cursor_warp_absolute(pointer->server->cursor, &pointer->pointer->base,
+        event->x, event->y);
+}
+
+static void handle_pointer_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct horizon_pointer *pointer =
+        wl_container_of(listener, pointer, destroy);
+    wl_list_remove(&pointer->motion.link);
+    wl_list_remove(&pointer->motion_absolute.link);
+    wl_list_remove(&pointer->destroy.link);
+    free(pointer);
 }
 
 static void handle_keyboard_destroy(struct wl_listener *listener, void *data) {
@@ -275,7 +309,21 @@ static void handle_new_input(struct wl_listener *listener, void *data) {
     struct wlr_input_device *device = data;
 
     if (device->type == WLR_INPUT_DEVICE_POINTER) {
-        wlr_cursor_attach_input_device(server->cursor, device);
+        struct horizon_pointer *pointer = calloc(1, sizeof(*pointer));
+        if (pointer == NULL) {
+            fprintf(stderr, "horizon: failed to allocate pointer state\n");
+            return;
+        }
+
+        pointer->server = server;
+        pointer->pointer = wlr_pointer_from_input_device(device);
+        pointer->motion.notify = handle_pointer_motion;
+        pointer->motion_absolute.notify = handle_pointer_motion_absolute;
+        pointer->destroy.notify = handle_pointer_destroy;
+        wl_signal_add(&pointer->pointer->events.motion, &pointer->motion);
+        wl_signal_add(&pointer->pointer->events.motion_absolute,
+            &pointer->motion_absolute);
+        wl_signal_add(&device->events.destroy, &pointer->destroy);
         update_seat_capabilities(server);
         HORIZON_DEBUG_LOG("pointer attached: %s", device->name);
         return;
