@@ -6,9 +6,15 @@ PIXMAN_CFLAGS = $(shell pkg-config --cflags pixman-1)
 WAYLAND_LIBS = -lwlroots-$(WLR_VERSION) -lwayland-server -lpixman-1 -lxkbcommon
 
 horizon: main.c
-	$(CC) $(CFLAGS) $(WLR_CFLAGS) $(PIXMAN_CFLAGS) -o horizon main.c $(WAYLAND_LIBS)
+	$(CC) $(CFLAGS) $(WLR_CFLAGS) $(PIXMAN_CFLAGS) -o horizon main.c input.c $(WAYLAND_LIBS)
+
+horizon-tests: tests/input_test.c input.c input.h
+	$(CC) $(CFLAGS) $(WLR_CFLAGS) -I. -o $@ tests/input_test.c input.c
+
+test: horizon-tests
+	./horizon-tests
 
 clean:
-	rm -f horizon
+	rm -f horizon horizon-tests
 
-.PHONY: clean
+.PHONY: clean test

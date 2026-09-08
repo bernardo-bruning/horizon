@@ -1,18 +1,2 @@
-# Binários e arquivos compilados
-horizon
-*.o
-*.obj
-*.out
-*.a
-*.so
-*.dylib
-
-# Diretórios de build
-build/
-bin/
-dist/
-
-# Arquivos temporários
-*.tmp
-*.swp
-*~
+/horizon
+/horizon-tests

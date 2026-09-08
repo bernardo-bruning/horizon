@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-#include <linux/input-event-codes.h>
 #include <wayland-server-core.h>
 
 #include <wlr/backend.h>
@@ -13,6 +12,8 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
+
+#include "input.h"
 
 struct horizon_server {
     struct wl_display *display;
@@ -26,6 +27,7 @@ struct horizon_server {
 struct horizon_output {
     struct wlr_output *output;
     struct wl_listener frame;
+    struct wl_listener destroy;
 };
 
 struct horizon_keyboard {
@@ -68,6 +70,7 @@ static void handle_keyboard_destroy(struct wl_listener *listener, void *data) {
     struct horizon_keyboard *keyboard =
         wl_container_of(listener, keyboard, destroy);
     wl_list_remove(&keyboard->key.link);
+    wl_list_remove(&keyboard->destroy.link);
     free(keyboard);
 }
 
@@ -81,16 +84,12 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
     }
 
     uint32_t modifiers = wlr_keyboard_get_modifiers(horizon_keyboard->keyboard);
-    bool is_backspace = event->keycode == KEY_BACKSPACE;
     xkb_keysym_t keysym = XKB_KEY_NoSymbol;
     if (horizon_keyboard->keyboard->xkb_state != NULL) {
         keysym = xkb_state_key_get_one_sym(
             horizon_keyboard->keyboard->xkb_state, event->keycode + 8);
-        is_backspace = is_backspace || keysym == XKB_KEY_BackSpace;
     }
-    if ((modifiers & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) ==
-            (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT) &&
-        is_backspace) {
+    if (horizon_exit_shortcut_pressed(event->keycode, modifiers, keysym)) {
         printf("Exiting horizon (Ctrl+Alt+Backspace)\n");
         fflush(stdout);
         wl_display_terminate(horizon_keyboard->server->display);
@@ -154,6 +153,16 @@ static void render_frame(struct wl_listener *listener, void *data) {
     wlr_output_state_finish(&state);
 }
 
+static void handle_output_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+
+    struct horizon_output *horizon_output =
+        wl_container_of(listener, horizon_output, destroy);
+    wl_list_remove(&horizon_output->frame.link);
+    wl_list_remove(&horizon_output->destroy.link);
+    free(horizon_output);
+}
+
 static void handle_new_output(struct wl_listener *listener, void *data) {
     struct horizon_server *server =
         wl_container_of(listener, server, new_output);
@@ -188,7 +197,9 @@ static void handle_new_output(struct wl_listener *listener, void *data) {
     }
     horizon_output->output = output;
     horizon_output->frame.notify = render_frame;
+    horizon_output->destroy.notify = handle_output_destroy;
     wl_signal_add(&output->events.frame, &horizon_output->frame);
+    wl_signal_add(&output->events.destroy, &horizon_output->destroy);
 
     printf("Output ready: %s (%dx%d)\n", output->name, output->width, output->height);
     fflush(stdout);
@@ -255,6 +266,8 @@ int main(void) {
     fflush(stdout);
     wl_display_run(server.display);
 
+    wl_list_remove(&server.new_input.link);
+    wl_list_remove(&server.new_output.link);
     wlr_allocator_destroy(server.allocator);
     wlr_renderer_destroy(server.renderer);
     wlr_backend_destroy(server.backend);
