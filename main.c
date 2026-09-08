@@ -159,6 +159,7 @@ static void handle_pointer_motion(struct wl_listener *listener, void *data) {
     struct wlr_pointer_motion_event *event = data;
     wlr_cursor_move(pointer->server->cursor, &pointer->pointer->base,
         event->delta_x, event->delta_y);
+    update_cursor_scene(pointer->server);
 }
 
 static void handle_pointer_motion_absolute(struct wl_listener *listener, void *data) {
@@ -167,6 +168,7 @@ static void handle_pointer_motion_absolute(struct wl_listener *listener, void *d
     struct wlr_pointer_motion_absolute_event *event = data;
     wlr_cursor_warp_absolute(pointer->server->cursor, &pointer->pointer->base,
         event->x, event->y);
+    update_cursor_scene(pointer->server);
 }
 
 static void handle_pointer_destroy(struct wl_listener *listener, void *data) {
