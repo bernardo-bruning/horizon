@@ -20,6 +20,16 @@
 
 #include "input.h"
 
+#ifdef HORIZON_DEBUG
+#define HORIZON_DEBUG_LOG(...) do { \
+    fprintf(stderr, "[DEBUG] "); \
+    fprintf(stderr, __VA_ARGS__); \
+    fprintf(stderr, "\n"); \
+} while (0)
+#else
+#define HORIZON_DEBUG_LOG(...) do { } while (0)
+#endif
+
 struct horizon_server {
     struct wl_display *display;
     struct wlr_backend *backend;
@@ -44,8 +54,10 @@ struct horizon_output {
 struct horizon_xdg_toplevel {
     struct wlr_xdg_toplevel *toplevel;
     struct wlr_scene_tree *scene_tree;
+    bool configured;
     struct wl_listener map;
     struct wl_listener unmap;
+    struct wl_listener commit;
     struct wl_listener destroy;
 };
 
@@ -125,11 +137,38 @@ static void handle_xdg_map(struct wl_listener *listener, void *data) {
     struct horizon_xdg_toplevel *view =
         wl_container_of(listener, view, map);
     wlr_xdg_toplevel_set_activated(view->toplevel, true);
+    HORIZON_DEBUG_LOG("xdg map: title=%s", view->toplevel->title != NULL ?
+        view->toplevel->title : "untitled");
+    printf("XDG toplevel mapped: %s\n",
+        view->toplevel->title != NULL ? view->toplevel->title : "untitled");
+    fflush(stdout);
 }
 
 static void handle_xdg_unmap(struct wl_listener *listener, void *data) {
-    (void)listener;
     (void)data;
+
+    struct horizon_xdg_toplevel *view =
+        wl_container_of(listener, view, unmap);
+    HORIZON_DEBUG_LOG("xdg unmap: title=%s", view->toplevel->title != NULL ?
+        view->toplevel->title : "untitled");
+}
+
+static void handle_xdg_commit(struct wl_listener *listener, void *data) {
+    (void)data;
+
+    struct horizon_xdg_toplevel *view =
+        wl_container_of(listener, view, commit);
+    HORIZON_DEBUG_LOG("xdg commit: initialized=%d initial=%d mapped=%d",
+        view->toplevel->base->initialized,
+        view->toplevel->base->initial_commit,
+        view->toplevel->base->surface->mapped);
+
+    if (!view->configured && view->toplevel->base->initialized) {
+        wlr_xdg_toplevel_set_size(view->toplevel, 800, 600);
+        wlr_xdg_toplevel_set_activated(view->toplevel, true);
+        view->configured = true;
+        HORIZON_DEBUG_LOG("xdg initial configure sent: size=800x600");
+    }
 }
 
 static void handle_xdg_destroy(struct wl_listener *listener, void *data) {
@@ -137,8 +176,10 @@ static void handle_xdg_destroy(struct wl_listener *listener, void *data) {
 
     struct horizon_xdg_toplevel *view =
         wl_container_of(listener, view, destroy);
+    HORIZON_DEBUG_LOG("xdg destroy");
     wl_list_remove(&view->map.link);
     wl_list_remove(&view->unmap.link);
+    wl_list_remove(&view->commit.link);
     wl_list_remove(&view->destroy.link);
     free(view);
 }
@@ -166,9 +207,11 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
 
     view->map.notify = handle_xdg_map;
     view->unmap.notify = handle_xdg_unmap;
+    view->commit.notify = handle_xdg_commit;
     view->destroy.notify = handle_xdg_destroy;
     wl_signal_add(&toplevel->base->surface->events.map, &view->map);
     wl_signal_add(&toplevel->base->surface->events.unmap, &view->unmap);
+    wl_signal_add(&toplevel->base->surface->events.commit, &view->commit);
     wl_signal_add(&toplevel->base->events.destroy, &view->destroy);
 
     printf("XDG toplevel ready: %s\n",
