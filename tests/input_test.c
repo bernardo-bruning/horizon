@@ -71,6 +71,27 @@ static void test_vt_shortcuts_reject_invalid_combinations(void) {
     assert(binding != NULL && binding->argument == 1);
 }
 
+static void test_application_shortcuts(void) {
+    const struct horizon_key_binding *foot = binding_for(KEY_D,
+        WLR_MODIFIER_LOGO, XKB_KEY_d);
+    const struct horizon_key_binding *chromium = binding_for(KEY_D,
+        WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT, XKB_KEY_d);
+    const struct horizon_key_binding *maximize = binding_for(KEY_F,
+        WLR_MODIFIER_LOGO | WLR_MODIFIER_ALT, XKB_KEY_f);
+    const struct horizon_key_binding *fullscreen = binding_for(KEY_F,
+        WLR_MODIFIER_LOGO, XKB_KEY_f);
+
+    assert(foot != NULL && foot->action == HORIZON_ACTION_LAUNCH_COMMAND);
+    assert(foot->command != NULL && foot->command[0][0] == 'f');
+    assert(chromium != NULL &&
+        chromium->action == HORIZON_ACTION_LAUNCH_COMMAND);
+    assert(chromium->command != NULL && chromium->command[0][0] == 'c');
+    assert(maximize != NULL &&
+        maximize->action == HORIZON_ACTION_TOGGLE_MAXIMIZE);
+    assert(fullscreen != NULL &&
+        fullscreen->action == HORIZON_ACTION_FULLSCREEN);
+}
+
 int main(void) {
     test_exit_shortcut_accepts_physical_backspace();
     test_exit_shortcut_accepts_backspace_keysym();
@@ -80,6 +101,7 @@ int main(void) {
     test_vt_shortcuts_map_function_keys();
     test_vt_shortcuts_accept_extra_modifiers();
     test_vt_shortcuts_reject_invalid_combinations();
+    test_application_shortcuts();
     puts("input tests: ok");
     return 0;
 }

@@ -5,7 +5,36 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
+static char *const foot_command[] = { "foot", NULL };
+static char *const chromium_command[] = { "chromium", NULL };
+
 static const struct horizon_key_binding default_bindings[] = {
+	{
+		.modifiers = WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT,
+		.keysym = XKB_KEY_d,
+		.keycode = KEY_D,
+		.action = HORIZON_ACTION_LAUNCH_COMMAND,
+		.command = chromium_command,
+	},
+	{
+		.modifiers = WLR_MODIFIER_LOGO,
+		.keysym = XKB_KEY_d,
+		.keycode = KEY_D,
+		.action = HORIZON_ACTION_LAUNCH_COMMAND,
+		.command = foot_command,
+	},
+	{
+		.modifiers = WLR_MODIFIER_LOGO | WLR_MODIFIER_ALT,
+		.keysym = XKB_KEY_f,
+		.keycode = KEY_F,
+		.action = HORIZON_ACTION_TOGGLE_MAXIMIZE,
+	},
+	{
+		.modifiers = WLR_MODIFIER_LOGO,
+		.keysym = XKB_KEY_f,
+		.keycode = KEY_F,
+		.action = HORIZON_ACTION_FULLSCREEN,
+	},
 	{
 		.modifiers = WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT,
 		.keysym = XKB_KEY_BackSpace,

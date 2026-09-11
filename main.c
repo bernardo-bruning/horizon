@@ -11,6 +11,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <linux/input-event-codes.h>
+
 #include <wayland-server-core.h>
 
 #include <wlr/backend.h>
@@ -80,6 +82,10 @@ struct horizon_server {
     struct wl_listener new_toplevel;
     struct wl_listener new_toplevel_decoration;
     const struct horizon_config *config;
+    const char *socket;
+    struct horizon_xdg_toplevel *drag_view;
+    int drag_offset_x;
+    int drag_offset_y;
 };
 
 struct horizon_output {
@@ -96,6 +102,8 @@ struct horizon_xdg_toplevel {
     bool configured;
     bool fullscreen;
     bool maximized;
+    int x;
+    int y;
     struct horizon_server *server;
     struct wl_list link;
     struct wl_listener map;
@@ -109,8 +117,8 @@ static void update_view_layout(struct horizon_xdg_toplevel *view) {
     const struct horizon_window_config *config = &view->server->config->window;
     int width = config->default_width;
     int height = config->default_height;
-    int x = config->default_x;
-    int y = config->default_y;
+    int x = view->x;
+    int y = view->y;
 
     if ((view->fullscreen || view->maximized) &&
         view->server->output != NULL) {
@@ -367,6 +375,21 @@ static void handle_pointer_motion(struct wl_listener *listener, void *data) {
     struct wlr_pointer_motion_event *event = data;
     wlr_cursor_move(pointer->server->cursor, &pointer->pointer->base,
         event->delta_x, event->delta_y);
+    if (pointer->server->drag_view != NULL) {
+        struct horizon_xdg_toplevel *view = pointer->server->drag_view;
+        int x = (int)pointer->server->cursor->x -
+            pointer->server->drag_offset_x;
+        int y = (int)pointer->server->cursor->y -
+            pointer->server->drag_offset_y;
+        view->x = x;
+        view->y = y;
+        wlr_scene_node_set_position(&view->scene_tree->node, x, y);
+        horizon_decorator_update(view->decorator, x, y,
+            view->toplevel->current.width > 0 ? view->toplevel->current.width :
+                view->server->config->window.default_width,
+            view->toplevel->current.height > 0 ? view->toplevel->current.height :
+                view->server->config->window.default_height);
+    }
     update_cursor_scene(pointer->server);
     update_pointer_focus(pointer->server, event->time_msec);
 }
@@ -377,6 +400,21 @@ static void handle_pointer_motion_absolute(struct wl_listener *listener, void *d
     struct wlr_pointer_motion_absolute_event *event = data;
     wlr_cursor_warp_absolute(pointer->server->cursor, &pointer->pointer->base,
         event->x, event->y);
+    if (pointer->server->drag_view != NULL) {
+        struct horizon_xdg_toplevel *view = pointer->server->drag_view;
+        int x = (int)pointer->server->cursor->x -
+            pointer->server->drag_offset_x;
+        int y = (int)pointer->server->cursor->y -
+            pointer->server->drag_offset_y;
+        view->x = x;
+        view->y = y;
+        wlr_scene_node_set_position(&view->scene_tree->node, x, y);
+        horizon_decorator_update(view->decorator, x, y,
+            view->toplevel->current.width > 0 ? view->toplevel->current.width :
+                view->server->config->window.default_width,
+            view->toplevel->current.height > 0 ? view->toplevel->current.height :
+                view->server->config->window.default_height);
+    }
     update_cursor_scene(pointer->server);
     update_pointer_focus(pointer->server, event->time_msec);
 }
@@ -385,6 +423,35 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
     struct horizon_pointer *pointer =
         wl_container_of(listener, pointer, button);
     struct wlr_pointer_button_event *event = data;
+
+    bool left_button = event->button == BTN_LEFT;
+    bool logo_pressed = pointer->server->keyboard_group != NULL &&
+        (wlr_keyboard_get_modifiers(
+            &pointer->server->keyboard_group->keyboard) & WLR_MODIFIER_LOGO);
+    if (left_button && event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+        logo_pressed) {
+        double sx, sy;
+        struct horizon_xdg_toplevel *view = view_at(
+            pointer->server, &sx, &sy);
+        if (view != NULL && !view->maximized && !view->fullscreen &&
+            wlr_scene_node_coords(&view->scene_tree->node,
+                &pointer->server->drag_offset_x,
+                &pointer->server->drag_offset_y)) {
+            pointer->server->drag_view = view;
+            pointer->server->drag_offset_x =
+                (int)pointer->server->cursor->x -
+                pointer->server->drag_offset_x;
+            pointer->server->drag_offset_y =
+                (int)pointer->server->cursor->y -
+                pointer->server->drag_offset_y;
+            return;
+        }
+    }
+    if (left_button && event->state == WL_POINTER_BUTTON_STATE_RELEASED &&
+        pointer->server->drag_view != NULL) {
+        pointer->server->drag_view = NULL;
+        return;
+    }
 
     wlr_seat_pointer_notify_button(pointer->server->seat,
         event->time_msec, event->button, event->state);
@@ -442,6 +509,48 @@ static void handle_keyboard_modifiers(struct wl_listener *listener, void *data) 
         &server->keyboard_group->keyboard.modifiers);
 }
 
+static void set_view_state(struct horizon_xdg_toplevel *view,
+    bool maximized, bool fullscreen) {
+    view->maximized = maximized;
+    view->fullscreen = fullscreen;
+    wlr_xdg_toplevel_set_maximized(view->toplevel, maximized);
+    wlr_xdg_toplevel_set_fullscreen(view->toplevel, fullscreen);
+    if ((maximized || fullscreen) && view->server->output != NULL) {
+        wlr_xdg_toplevel_set_size(view->toplevel,
+            view->server->output->width, view->server->output->height);
+    }
+    update_view_layout(view);
+}
+
+static void launch_detached_command(char *const command[], const char *socket) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "horizon: failed to launch %s: %s\n",
+            command[0], strerror(errno));
+        return;
+    }
+    if (pid == 0) {
+        pid_t child = fork();
+        if (child < 0) {
+            _exit(127);
+        }
+        if (child > 0) {
+            _exit(0);
+        }
+        if (setenv("WAYLAND_DISPLAY", socket, 1) != 0) {
+            dprintf(STDOUT_FILENO, "horizon: failed to set WAYLAND_DISPLAY: %s\n",
+                strerror(errno));
+            _exit(127);
+        }
+        execvp(command[0], command);
+        dprintf(STDOUT_FILENO, "horizon: failed to execute %s: %s\n",
+            command[0], strerror(errno));
+        _exit(127);
+    }
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+    }
+}
+
 static void handle_keyboard_key(struct wl_listener *listener, void *data) {
     struct horizon_server *server =
         wl_container_of(listener, server, keyboard_key);
@@ -484,14 +593,36 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
 
     wlr_seat_keyboard_notify_key(server->seat,
         event->time_msec, event->keycode, event->state);
-    if (binding == NULL || binding->action != HORIZON_ACTION_SWITCH_VT ||
-        server->session == NULL) {
+    if (binding == NULL) {
         return;
     }
 
-    if (!wlr_session_change_vt(server->session, binding->argument)) {
-        fprintf(stderr, "horizon: failed to switch to VT%u\n",
-            binding->argument);
+    switch (binding->action) {
+    case HORIZON_ACTION_SWITCH_VT:
+        if (server->session != NULL &&
+            !wlr_session_change_vt(server->session, binding->argument)) {
+            fprintf(stderr, "horizon: failed to switch to VT%u\n",
+                binding->argument);
+        }
+        break;
+    case HORIZON_ACTION_LAUNCH_COMMAND:
+        if (binding->command != NULL) {
+            launch_detached_command(binding->command, server->socket);
+        }
+        break;
+    case HORIZON_ACTION_TOGGLE_MAXIMIZE:
+        if (server->focused_view != NULL) {
+            set_view_state(server->focused_view,
+                !server->focused_view->maximized, false);
+        }
+        break;
+    case HORIZON_ACTION_FULLSCREEN:
+        if (server->focused_view != NULL) {
+            set_view_state(server->focused_view, false, true);
+        }
+        break;
+    case HORIZON_ACTION_EXIT:
+        break;
     }
 }
 
@@ -529,6 +660,9 @@ static void handle_xdg_unmap(struct wl_listener *listener, void *data) {
         wl_container_of(listener, view, unmap);
     if (view->server->pointer_view == view) {
         view->server->pointer_view = NULL;
+    }
+    if (view->server->drag_view == view) {
+        view->server->drag_view = NULL;
     }
     if (view->server->focused_view == view) {
         focus_view(view->server, NULL, 0, 0);
@@ -661,6 +795,8 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
     view->fullscreen = server->config->window.accept_client_fullscreen &&
         toplevel->requested.fullscreen;
     view->maximized = server->config->window.maximize_on_start;
+    view->x = server->config->window.default_x;
+    view->y = server->config->window.default_y;
     update_view_layout(view);
     view->scene_tree->node.data = view;
     wl_list_insert(&server->views, &view->link);
@@ -993,6 +1129,7 @@ int main(int argc, char *argv[]) {
     }
 
     server.config = &horizon_default_config;
+    server.socket = socket;
     server.seat = wlr_seat_create(server.display, server.config->seat_name);
     if (server.seat == NULL) {
         fprintf(stderr, "horizon: failed to create seat\n");

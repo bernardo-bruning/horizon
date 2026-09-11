@@ -10,6 +10,9 @@
 enum horizon_action {
 	HORIZON_ACTION_EXIT,
 	HORIZON_ACTION_SWITCH_VT,
+	HORIZON_ACTION_LAUNCH_COMMAND,
+	HORIZON_ACTION_TOGGLE_MAXIMIZE,
+	HORIZON_ACTION_FULLSCREEN,
 };
 
 struct horizon_key_binding {
@@ -18,6 +21,7 @@ struct horizon_key_binding {
 	uint32_t keycode;
 	enum horizon_action action;
 	unsigned argument;
+	char *const *command;
 };
 
 struct horizon_window_config {
