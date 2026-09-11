@@ -7,14 +7,15 @@
 
 static char *const foot_command[] = { "foot", NULL };
 static char *const chromium_command[] = { "chromium", NULL };
+static char *const wofi_command[] = { "wofi", "--show", "drun", NULL };
 
 static const struct horizon_key_binding default_bindings[] = {
 	{
-		.modifiers = WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT,
+		.modifiers = WLR_MODIFIER_LOGO,
 		.keysym = XKB_KEY_d,
 		.keycode = KEY_D,
 		.action = HORIZON_ACTION_LAUNCH_COMMAND,
-		.command = chromium_command,
+		.command = wofi_command,
 	},
 	{
 		.modifiers = WLR_MODIFIER_LOGO,
@@ -23,9 +24,16 @@ static const struct horizon_key_binding default_bindings[] = {
 		.action = HORIZON_ACTION_CLOSE_WINDOW,
 	},
 	{
+		.modifiers = WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT,
+		.keysym = XKB_KEY_Return,
+		.keycode = KEY_ENTER,
+		.action = HORIZON_ACTION_LAUNCH_COMMAND,
+		.command = chromium_command,
+	},
+	{
 		.modifiers = WLR_MODIFIER_LOGO,
-		.keysym = XKB_KEY_d,
-		.keycode = KEY_D,
+		.keysym = XKB_KEY_Return,
+		.keycode = KEY_ENTER,
 		.action = HORIZON_ACTION_LAUNCH_COMMAND,
 		.command = foot_command,
 	},

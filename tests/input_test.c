@@ -72,10 +72,12 @@ static void test_vt_shortcuts_reject_invalid_combinations(void) {
 }
 
 static void test_application_shortcuts(void) {
-    const struct horizon_key_binding *foot = binding_for(KEY_D,
-        WLR_MODIFIER_LOGO, XKB_KEY_d);
-    const struct horizon_key_binding *chromium = binding_for(KEY_D,
-        WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT, XKB_KEY_d);
+	const struct horizon_key_binding *wofi = binding_for(KEY_D,
+	    WLR_MODIFIER_LOGO, XKB_KEY_d);
+	const struct horizon_key_binding *foot = binding_for(KEY_ENTER,
+	    WLR_MODIFIER_LOGO, XKB_KEY_Return);
+	const struct horizon_key_binding *chromium = binding_for(KEY_ENTER,
+	    WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT, XKB_KEY_Return);
     const struct horizon_key_binding *maximize = binding_for(KEY_F,
         WLR_MODIFIER_LOGO | WLR_MODIFIER_ALT, XKB_KEY_f);
     const struct horizon_key_binding *fullscreen = binding_for(KEY_F,
@@ -83,8 +85,11 @@ static void test_application_shortcuts(void) {
     const struct horizon_key_binding *close = binding_for(KEY_Q,
         WLR_MODIFIER_LOGO, XKB_KEY_q);
 
-    assert(foot != NULL && foot->action == HORIZON_ACTION_LAUNCH_COMMAND);
-    assert(foot->command != NULL && foot->command[0][0] == 'f');
+	assert(wofi != NULL && wofi->action == HORIZON_ACTION_LAUNCH_COMMAND);
+	assert(wofi->command != NULL && wofi->command[0][0] == 'w');
+	assert(wofi->command[1] != NULL && wofi->command[1][0] == '-');
+	assert(foot != NULL && foot->action == HORIZON_ACTION_LAUNCH_COMMAND);
+	assert(foot->command != NULL && foot->command[0][0] == 'f');
     assert(chromium != NULL &&
         chromium->action == HORIZON_ACTION_LAUNCH_COMMAND);
     assert(chromium->command != NULL && chromium->command[0][0] == 'c');
