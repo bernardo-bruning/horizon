@@ -282,6 +282,9 @@ static void enter_keyboard_focus(struct horizon_server *server,
         &keyboard->modifiers);
 }
 
+static void set_view_state(struct horizon_xdg_toplevel *view,
+    bool maximized, bool fullscreen);
+
 static void focus_view(struct horizon_server *server,
     struct horizon_xdg_toplevel *view, double sx, double sy) {
     if (server->focused_view == view) {
@@ -296,6 +299,10 @@ static void focus_view(struct horizon_server *server,
         view_title(server->focused_view), view_title(view));
 
     if (server->focused_view != NULL) {
+        if (server->focused_view->maximized) {
+            set_view_state(server->focused_view, false, false);
+            arrange_views(server);
+        }
         wlr_xdg_toplevel_set_activated(
             server->focused_view->toplevel, false);
     }
@@ -668,6 +675,9 @@ static void set_view_state(struct horizon_xdg_toplevel *view,
         wlr_xdg_toplevel_set_size(view->toplevel,
             view->server->output->width, view->server->output->height);
     }
+    if (maximized || fullscreen) {
+        raise_view_to_top(view);
+    }
     update_view_layout(view);
 }
 
@@ -778,8 +788,9 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
         break;
     case HORIZON_ACTION_TOGGLE_MAXIMIZE:
         if (server->focused_view != NULL) {
-            set_view_state(server->focused_view,
-                !server->focused_view->maximized, false);
+            struct horizon_xdg_toplevel *view = server->focused_view;
+            set_view_state(view, !view->maximized, false);
+            arrange_views(server);
         }
         break;
     case HORIZON_ACTION_FULLSCREEN:
@@ -861,6 +872,9 @@ static void handle_xdg_commit(struct wl_listener *listener, void *data) {
         view->maximized = !view->server->config->window.tile_on_start &&
             view->server->config->window.maximize_on_start;
         wlr_xdg_toplevel_set_maximized(view->toplevel, view->maximized);
+        if (view->maximized) {
+            raise_view_to_top(view);
+        }
 
         if (view->server->config->window.accept_client_fullscreen &&
             view->toplevel->requested.fullscreen) {
@@ -868,6 +882,9 @@ static void handle_xdg_commit(struct wl_listener *listener, void *data) {
             wlr_xdg_toplevel_set_fullscreen(view->toplevel, true);
         } else if (view->toplevel->requested.fullscreen) {
             wlr_xdg_toplevel_set_fullscreen(view->toplevel, false);
+        }
+        if (view->fullscreen) {
+            raise_view_to_top(view);
         }
         wlr_xdg_toplevel_set_size(view->toplevel,
             (view->fullscreen || view->maximized) &&
@@ -905,6 +922,7 @@ static void handle_xdg_request_fullscreen(struct wl_listener *listener,
     view->maximized = true;
     wlr_xdg_toplevel_set_maximized(view->toplevel, true);
     wlr_xdg_toplevel_set_fullscreen(view->toplevel, view->fullscreen);
+    raise_view_to_top(view);
     if ((view->fullscreen || view->maximized) &&
         view->server->output != NULL) {
         wlr_xdg_toplevel_set_size(view->toplevel,
