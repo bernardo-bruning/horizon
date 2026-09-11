@@ -101,6 +101,46 @@ static void test_application_shortcuts(void) {
         close->action == HORIZON_ACTION_CLOSE_WINDOW);
 }
 
+static void test_focus_direction_shortcuts(void) {
+    const struct horizon_key_binding *left = binding_for(KEY_H,
+        WLR_MODIFIER_LOGO, XKB_KEY_h);
+    const struct horizon_key_binding *left_arrow = binding_for(KEY_LEFT,
+        WLR_MODIFIER_LOGO, XKB_KEY_Left);
+    const struct horizon_key_binding *down = binding_for(KEY_J,
+        WLR_MODIFIER_LOGO, XKB_KEY_j);
+    const struct horizon_key_binding *down_arrow = binding_for(KEY_DOWN,
+        WLR_MODIFIER_LOGO, XKB_KEY_Down);
+    const struct horizon_key_binding *up = binding_for(KEY_K,
+        WLR_MODIFIER_LOGO, XKB_KEY_k);
+    const struct horizon_key_binding *up_arrow = binding_for(KEY_UP,
+        WLR_MODIFIER_LOGO, XKB_KEY_Up);
+    const struct horizon_key_binding *right = binding_for(KEY_L,
+        WLR_MODIFIER_LOGO, XKB_KEY_l);
+    const struct horizon_key_binding *right_arrow = binding_for(KEY_RIGHT,
+        WLR_MODIFIER_LOGO, XKB_KEY_Right);
+
+    assert(left != NULL && left->action == HORIZON_ACTION_FOCUS_DIRECTION &&
+        left->argument == HORIZON_DIRECTION_LEFT);
+    assert(left_arrow != NULL &&
+        left_arrow->action == HORIZON_ACTION_FOCUS_DIRECTION &&
+        left_arrow->argument == HORIZON_DIRECTION_LEFT);
+    assert(down != NULL && down->action == HORIZON_ACTION_FOCUS_DIRECTION &&
+        down->argument == HORIZON_DIRECTION_DOWN);
+    assert(down_arrow != NULL &&
+        down_arrow->action == HORIZON_ACTION_FOCUS_DIRECTION &&
+        down_arrow->argument == HORIZON_DIRECTION_DOWN);
+    assert(up != NULL && up->action == HORIZON_ACTION_FOCUS_DIRECTION &&
+        up->argument == HORIZON_DIRECTION_UP);
+    assert(up_arrow != NULL &&
+        up_arrow->action == HORIZON_ACTION_FOCUS_DIRECTION &&
+        up_arrow->argument == HORIZON_DIRECTION_UP);
+    assert(right != NULL && right->action == HORIZON_ACTION_FOCUS_DIRECTION &&
+        right->argument == HORIZON_DIRECTION_RIGHT);
+    assert(right_arrow != NULL &&
+        right_arrow->action == HORIZON_ACTION_FOCUS_DIRECTION &&
+        right_arrow->argument == HORIZON_DIRECTION_RIGHT);
+}
+
 int main(void) {
     test_exit_shortcut_accepts_physical_backspace();
     test_exit_shortcut_accepts_backspace_keysym();
@@ -111,6 +151,7 @@ int main(void) {
     test_vt_shortcuts_accept_extra_modifiers();
     test_vt_shortcuts_reject_invalid_combinations();
     test_application_shortcuts();
+    test_focus_direction_shortcuts();
     puts("input tests: ok");
     return 0;
 }

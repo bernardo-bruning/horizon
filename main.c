@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/types.h>
@@ -284,6 +285,7 @@ static void enter_keyboard_focus(struct horizon_server *server,
 
 static void set_view_state(struct horizon_xdg_toplevel *view,
     bool maximized, bool fullscreen);
+static void raise_view_to_top(struct horizon_xdg_toplevel *view);
 
 static void focus_view(struct horizon_server *server,
     struct horizon_xdg_toplevel *view, double sx, double sy) {
@@ -299,7 +301,8 @@ static void focus_view(struct horizon_server *server,
         view_title(server->focused_view), view_title(view));
 
     if (server->focused_view != NULL) {
-        if (server->focused_view->maximized) {
+        if (server->focused_view->maximized ||
+            server->focused_view->fullscreen) {
             set_view_state(server->focused_view, false, false);
             arrange_views(server);
         }
@@ -316,6 +319,7 @@ static void focus_view(struct horizon_server *server,
 
     wlr_xdg_toplevel_set_activated(view->toplevel, true);
     enter_keyboard_focus(server, view);
+    raise_view_to_top(view);
     HORIZON_DEBUG_LOG("keyboard focus target: %s", view_title(view));
     wlr_seat_pointer_notify_enter(server->seat,
         view->toplevel->base->surface, sx, sy);
@@ -341,6 +345,78 @@ static void raise_view_to_top(struct horizon_xdg_toplevel *view) {
         wlr_scene_node_raise_to_top(&view->decorator->right->node);
     }
     wlr_scene_node_raise_to_top(&view->scene_tree->node);
+}
+
+static struct horizon_xdg_toplevel *find_view_in_direction(
+    struct horizon_server *server, struct horizon_xdg_toplevel *source,
+    enum horizon_focus_direction direction) {
+    if (source == NULL) {
+        return NULL;
+    }
+
+    int source_width = source->toplevel->current.width > 0 ?
+        source->toplevel->current.width :
+        server->config->window.default_width;
+    int source_height = source->toplevel->current.height > 0 ?
+        source->toplevel->current.height :
+        server->config->window.default_height;
+    int source_center_x = source->x + source_width / 2;
+    int source_center_y = source->y + source_height / 2;
+    long best_primary = LONG_MAX;
+    long best_secondary = LONG_MAX;
+    struct horizon_xdg_toplevel *best = NULL;
+    struct horizon_xdg_toplevel *view;
+
+    wl_list_for_each(view, &server->views, link) {
+        if (view == source || !view->toplevel->base->surface->mapped ||
+            view->fullscreen || view->maximized) {
+            continue;
+        }
+
+        int width = view->toplevel->current.width > 0 ?
+            view->toplevel->current.width : server->config->window.default_width;
+        int height = view->toplevel->current.height > 0 ?
+            view->toplevel->current.height : server->config->window.default_height;
+        int center_x = view->x + width / 2;
+        int center_y = view->y + height / 2;
+        long primary;
+        long secondary;
+        bool in_direction;
+
+        switch (direction) {
+        case HORIZON_DIRECTION_LEFT:
+            in_direction = center_x < source_center_x;
+            primary = source_center_x - center_x;
+            secondary = labs((long)center_y - source_center_y);
+            break;
+        case HORIZON_DIRECTION_DOWN:
+            in_direction = center_y > source_center_y;
+            primary = center_y - source_center_y;
+            secondary = labs((long)center_x - source_center_x);
+            break;
+        case HORIZON_DIRECTION_UP:
+            in_direction = center_y < source_center_y;
+            primary = source_center_y - center_y;
+            secondary = labs((long)center_x - source_center_x);
+            break;
+        case HORIZON_DIRECTION_RIGHT:
+            in_direction = center_x > source_center_x;
+            primary = center_x - source_center_x;
+            secondary = labs((long)center_y - source_center_y);
+            break;
+        default:
+            return NULL;
+        }
+
+        if (in_direction && (primary < best_primary ||
+            (primary == best_primary && secondary < best_secondary))) {
+            best = view;
+            best_primary = primary;
+            best_secondary = secondary;
+        }
+    }
+
+    return best;
 }
 
 static void update_pointer_focus(struct horizon_server *server,
@@ -784,6 +860,15 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
         if (server->focused_view != NULL) {
             wlr_xdg_toplevel_send_close(
                 server->focused_view->toplevel);
+        }
+        break;
+    case HORIZON_ACTION_FOCUS_DIRECTION:
+        if (server->focused_view != NULL) {
+            struct horizon_xdg_toplevel *view = find_view_in_direction(
+                server, server->focused_view, binding->argument);
+            if (view != NULL) {
+                focus_view(server, view, 0, 0);
+            }
         }
         break;
     case HORIZON_ACTION_TOGGLE_MAXIMIZE:
