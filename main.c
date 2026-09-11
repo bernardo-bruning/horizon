@@ -770,6 +770,12 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
             launch_detached_command(binding->command, server->socket);
         }
         break;
+    case HORIZON_ACTION_CLOSE_WINDOW:
+        if (server->focused_view != NULL) {
+            wlr_xdg_toplevel_send_close(
+                server->focused_view->toplevel);
+        }
+        break;
     case HORIZON_ACTION_TOGGLE_MAXIMIZE:
         if (server->focused_view != NULL) {
             set_view_state(server->focused_view,

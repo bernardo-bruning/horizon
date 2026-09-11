@@ -18,6 +18,12 @@ static const struct horizon_key_binding default_bindings[] = {
 	},
 	{
 		.modifiers = WLR_MODIFIER_LOGO,
+		.keysym = XKB_KEY_q,
+		.keycode = KEY_Q,
+		.action = HORIZON_ACTION_CLOSE_WINDOW,
+	},
+	{
+		.modifiers = WLR_MODIFIER_LOGO,
 		.keysym = XKB_KEY_d,
 		.keycode = KEY_D,
 		.action = HORIZON_ACTION_LAUNCH_COMMAND,

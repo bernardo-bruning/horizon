@@ -80,6 +80,8 @@ static void test_application_shortcuts(void) {
         WLR_MODIFIER_LOGO | WLR_MODIFIER_ALT, XKB_KEY_f);
     const struct horizon_key_binding *fullscreen = binding_for(KEY_F,
         WLR_MODIFIER_LOGO, XKB_KEY_f);
+    const struct horizon_key_binding *close = binding_for(KEY_Q,
+        WLR_MODIFIER_LOGO, XKB_KEY_q);
 
     assert(foot != NULL && foot->action == HORIZON_ACTION_LAUNCH_COMMAND);
     assert(foot->command != NULL && foot->command[0][0] == 'f');
@@ -90,6 +92,8 @@ static void test_application_shortcuts(void) {
         maximize->action == HORIZON_ACTION_TOGGLE_MAXIMIZE);
     assert(fullscreen != NULL &&
         fullscreen->action == HORIZON_ACTION_FULLSCREEN);
+    assert(close != NULL &&
+        close->action == HORIZON_ACTION_CLOSE_WINDOW);
 }
 
 int main(void) {
