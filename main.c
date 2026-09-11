@@ -274,6 +274,16 @@ static void focus_initial_view(struct horizon_server *server,
     HORIZON_DEBUG_LOG("initial keyboard focus: %s", view_title(view));
 }
 
+static void raise_view_to_top(struct horizon_xdg_toplevel *view) {
+    if (view->decorator != NULL) {
+        wlr_scene_node_raise_to_top(&view->decorator->top->node);
+        wlr_scene_node_raise_to_top(&view->decorator->bottom->node);
+        wlr_scene_node_raise_to_top(&view->decorator->left->node);
+        wlr_scene_node_raise_to_top(&view->decorator->right->node);
+    }
+    wlr_scene_node_raise_to_top(&view->scene_tree->node);
+}
+
 static void update_pointer_focus(struct horizon_server *server,
     uint32_t time_msec) {
     double sx = 0, sy = 0;
@@ -474,6 +484,17 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
     bool logo_pressed = pointer->server->keyboard_group != NULL &&
         (wlr_keyboard_get_modifiers(
             &pointer->server->keyboard_group->keyboard) & WLR_MODIFIER_LOGO);
+    if (event->state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        double sx, sy;
+        struct horizon_xdg_toplevel *view = view_at(
+            pointer->server, &sx, &sy);
+        if (view != NULL) {
+            pointer->server->pointer_view = view;
+            focus_view(pointer->server, view, sx, sy);
+            raise_view_to_top(view);
+            update_cursor_scene(pointer->server);
+        }
+    }
     if (left_button && event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
         logo_pressed) {
         double sx, sy;
