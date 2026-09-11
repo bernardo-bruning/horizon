@@ -6,11 +6,10 @@
 
 #include <xkbcommon/xkbcommon.h>
 
-bool horizon_exit_shortcut_pressed(
-    uint32_t keycode, uint32_t modifiers, xkb_keysym_t keysym);
+#include "config.h"
 
-/* Returns the target VT for Ctrl+Alt+F1..F12, or 0 if not a VT shortcut. */
-unsigned horizon_vt_shortcut(
-    uint32_t keycode, uint32_t modifiers, xkb_keysym_t keysym);
+const struct horizon_key_binding *horizon_find_key_binding(
+	const struct horizon_input_config *config,
+	uint32_t keycode, uint32_t modifiers, xkb_keysym_t keysym);
 
 #endif

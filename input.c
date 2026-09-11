@@ -1,36 +1,23 @@
 #include "input.h"
 
-#include <linux/input-event-codes.h>
-
 #include <wlr/types/wlr_keyboard.h>
-#include <xkbcommon/xkbcommon-keysyms.h>
 
-bool horizon_exit_shortcut_pressed(
+const struct horizon_key_binding *horizon_find_key_binding(
+    const struct horizon_input_config *config,
     uint32_t keycode, uint32_t modifiers, xkb_keysym_t keysym) {
-    const uint32_t required_modifiers = WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT;
-    const bool has_required_modifiers =
-        (modifiers & required_modifiers) == required_modifiers;
-    const bool is_backspace =
-        keycode == KEY_BACKSPACE || keysym == XKB_KEY_BackSpace;
-
-    return has_required_modifiers && is_backspace;
-}
-
-unsigned horizon_vt_shortcut(
-    uint32_t keycode, uint32_t modifiers, xkb_keysym_t keysym) {
-    const uint32_t required_modifiers = WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT;
-    if ((modifiers & required_modifiers) != required_modifiers) {
-        return 0;
+    if (config == NULL || config->bindings == NULL) {
+        return NULL;
     }
 
-    if (keysym >= XKB_KEY_F1 && keysym <= XKB_KEY_F12) {
-        return (unsigned)(keysym - XKB_KEY_F1) + 1;
+    for (size_t i = 0; i < config->binding_count; i++) {
+        const struct horizon_key_binding *binding = &config->bindings[i];
+        bool key_matches = (binding->keysym != 0 && binding->keysym == keysym) ||
+            (binding->keycode != 0 && binding->keycode == keycode);
+        if ((modifiers & binding->modifiers) == binding->modifiers &&
+            key_matches) {
+            return binding;
+        }
     }
 
-    /* Keep working if xkb has not produced a keysym yet. */
-    if (keycode >= KEY_F1 && keycode <= KEY_F12) {
-        return (unsigned)(keycode - KEY_F1) + 1;
-    }
-
-    return 0;
+    return NULL;
 }

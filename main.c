@@ -36,6 +36,7 @@
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 #include "input.h"
+#include "config.h"
 #include "decorator.h"
 
 #ifdef HORIZON_DEBUG
@@ -78,6 +79,7 @@ struct horizon_server {
     struct wl_listener new_input;
     struct wl_listener new_toplevel;
     struct wl_listener new_toplevel_decoration;
+    const struct horizon_config *config;
 };
 
 struct horizon_output {
@@ -103,13 +105,12 @@ struct horizon_xdg_toplevel {
     struct wl_listener destroy;
 };
 
-#define HORIZON_BORDER_WIDTH 2
-
 static void update_view_layout(struct horizon_xdg_toplevel *view) {
-    int width = 800;
-    int height = 600;
-    int x = 80;
-    int y = 80;
+    const struct horizon_window_config *config = &view->server->config->window;
+    int width = config->default_width;
+    int height = config->default_height;
+    int x = config->default_x;
+    int y = config->default_y;
 
     if ((view->fullscreen || view->maximized) &&
         view->server->output != NULL) {
@@ -128,7 +129,8 @@ static void update_view_layout(struct horizon_xdg_toplevel *view) {
 }
 
 static void configure_view_decoration(struct horizon_xdg_toplevel *view) {
-    if (view->server->xdg_decoration_manager == NULL ||
+    if (!view->server->config->decoration.enabled ||
+        view->server->xdg_decoration_manager == NULL ||
         !view->toplevel->base->initialized) {
         return;
     }
@@ -276,7 +278,8 @@ static void update_pointer_focus(struct horizon_server *server,
     wlr_seat_pointer_notify_frame(server->seat);
 }
 
-static bool configure_keyboard(struct wlr_keyboard *keyboard) {
+static bool configure_keyboard(struct wlr_keyboard *keyboard,
+    const struct horizon_input_config *config) {
     struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     if (context == NULL) {
         fprintf(stderr, "horizon: failed to create XKB context\n");
@@ -299,7 +302,8 @@ static bool configure_keyboard(struct wlr_keyboard *keyboard) {
         return false;
     }
 
-    wlr_keyboard_set_repeat_info(keyboard, 25, 600);
+    wlr_keyboard_set_repeat_info(keyboard,
+        config->repeat_rate, config->repeat_delay);
     return true;
 }
 
@@ -469,8 +473,10 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
     HORIZON_DEBUG_LOG(
         "keyboard translation: keycode=%u keysym=0x%x name=%s utf8=%s",
         event->keycode, keysym, keysym_name, utf8);
-    if (horizon_exit_shortcut_pressed(event->keycode, modifiers, keysym)) {
-        printf("Exiting horizon (Ctrl+Alt+Backspace)\n");
+    const struct horizon_key_binding *binding = horizon_find_key_binding(
+        &server->config->input, event->keycode, modifiers, keysym);
+    if (binding != NULL && binding->action == HORIZON_ACTION_EXIT) {
+        printf("Exiting horizon\n");
         fflush(stdout);
         wl_display_terminate(server->display);
         return;
@@ -478,13 +484,14 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
 
     wlr_seat_keyboard_notify_key(server->seat,
         event->time_msec, event->keycode, event->state);
-    unsigned vt = horizon_vt_shortcut(event->keycode, modifiers, keysym);
-    if (vt == 0 || server->session == NULL) {
+    if (binding == NULL || binding->action != HORIZON_ACTION_SWITCH_VT ||
+        server->session == NULL) {
         return;
     }
 
-    if (!wlr_session_change_vt(server->session, vt)) {
-        fprintf(stderr, "horizon: failed to switch to VT%u\n", vt);
+    if (!wlr_session_change_vt(server->session, binding->argument)) {
+        fprintf(stderr, "horizon: failed to switch to VT%u\n",
+            binding->argument);
     }
 }
 
@@ -505,9 +512,11 @@ static void handle_xdg_map(struct wl_listener *listener, void *data) {
 
 static void handle_new_toplevel_decoration(struct wl_listener *listener,
     void *data) {
-    (void)listener;
+    struct horizon_server *server =
+        wl_container_of(listener, server, new_toplevel_decoration);
     struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
-    if (decoration->toplevel->base->initialized) {
+    if (server->config->decoration.enabled &&
+        decoration->toplevel->base->initialized) {
         wlr_xdg_toplevel_decoration_v1_set_mode(decoration,
             WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
     }
@@ -541,22 +550,26 @@ static void handle_xdg_commit(struct wl_listener *listener, void *data) {
     if (!view->configured && view->toplevel->base->initialized) {
         configure_view_decoration(view);
 
-        /* Open every application maximized, while keeping it a normal
-         * xdg-toplevel rather than forcing fullscreen mode. */
-        view->maximized = true;
-        wlr_xdg_toplevel_set_maximized(view->toplevel, true);
+        /* Apply the configured initial window policy. */
+        view->maximized = view->server->config->window.maximize_on_start;
+        wlr_xdg_toplevel_set_maximized(view->toplevel, view->maximized);
 
-        if (view->toplevel->requested.fullscreen) {
+        if (view->server->config->window.accept_client_fullscreen &&
+            view->toplevel->requested.fullscreen) {
             view->fullscreen = true;
             wlr_xdg_toplevel_set_fullscreen(view->toplevel, true);
+        } else if (view->toplevel->requested.fullscreen) {
+            wlr_xdg_toplevel_set_fullscreen(view->toplevel, false);
         }
         wlr_xdg_toplevel_set_size(view->toplevel,
             (view->fullscreen || view->maximized) &&
                 view->server->output != NULL ?
-                view->server->output->width : 800,
+                view->server->output->width :
+                view->server->config->window.default_width,
             (view->fullscreen || view->maximized) &&
                 view->server->output != NULL ?
-                view->server->output->height : 600);
+                view->server->output->height :
+                view->server->config->window.default_height);
         wlr_xdg_toplevel_set_activated(view->toplevel, false);
         view->configured = true;
         HORIZON_DEBUG_LOG("xdg initial configure sent: fullscreen=%d maximized=%d size=%dx%d",
@@ -564,10 +577,12 @@ static void handle_xdg_commit(struct wl_listener *listener, void *data) {
             view->maximized,
             (view->fullscreen || view->maximized) &&
                 view->server->output != NULL ?
-                view->server->output->width : 800,
+                view->server->output->width :
+                view->server->config->window.default_width,
             (view->fullscreen || view->maximized) &&
                 view->server->output != NULL ?
-                view->server->output->height : 600);
+                view->server->output->height :
+                view->server->config->window.default_height);
     }
     update_view_layout(view);
 }
@@ -577,7 +592,8 @@ static void handle_xdg_request_fullscreen(struct wl_listener *listener,
     (void)data;
     struct horizon_xdg_toplevel *view =
         wl_container_of(listener, view, request_fullscreen);
-    view->fullscreen = view->toplevel->requested.fullscreen;
+    view->fullscreen = view->server->config->window.accept_client_fullscreen &&
+        view->toplevel->requested.fullscreen;
     view->maximized = true;
     wlr_xdg_toplevel_set_maximized(view->toplevel, true);
     wlr_xdg_toplevel_set_fullscreen(view->toplevel, view->fullscreen);
@@ -631,17 +647,20 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
         free(view);
         return;
     }
-    const float border_color[] = { 0.25f, 0.55f, 0.95f, 1.0f };
-    view->decorator = horizon_decorator_create(&server->scene->tree,
-        HORIZON_BORDER_WIDTH, border_color);
-    if (view->decorator == NULL) {
+    if (server->config->decoration.enabled) {
+        view->decorator = horizon_decorator_create(&server->scene->tree,
+            server->config->decoration.border_width,
+            server->config->decoration.border_color);
+    }
+    if (server->config->decoration.enabled && view->decorator == NULL) {
         fprintf(stderr, "horizon: failed to create window decorator\n");
         wlr_scene_node_destroy(&view->scene_tree->node);
         free(view);
         return;
     }
-    view->fullscreen = toplevel->requested.fullscreen;
-    view->maximized = true;
+    view->fullscreen = server->config->window.accept_client_fullscreen &&
+        toplevel->requested.fullscreen;
+    view->maximized = server->config->window.maximize_on_start;
     update_view_layout(view);
     view->scene_tree->node.data = view;
     wl_list_insert(&server->views, &view->link);
@@ -707,7 +726,7 @@ static void handle_new_input(struct wl_listener *listener, void *data) {
 
     keyboard->server = server;
     keyboard->keyboard = wlr_keyboard_from_input_device(device);
-    if (!configure_keyboard(keyboard->keyboard)) {
+    if (!configure_keyboard(keyboard->keyboard, &server->config->input)) {
         HORIZON_DEBUG_LOG("keyboard configure failed: %s", device->name);
         free(keyboard);
         return;
@@ -842,9 +861,11 @@ static void handle_new_output(struct wl_listener *listener, void *data) {
         fprintf(stderr, "horizon: failed to load cursor theme for output %s\n",
             output->name);
     }
-    wlr_cursor_set_xcursor(server->cursor, server->cursor_manager, "left_ptr");
+    wlr_cursor_set_xcursor(server->cursor, server->cursor_manager,
+        server->config->output.cursor_name);
     server->cursor_image = wlr_xcursor_manager_get_xcursor(
-        server->cursor_manager, "left_ptr", output->scale);
+        server->cursor_manager, server->config->output.cursor_name,
+        output->scale);
 
     wlr_output_create_global(output, server->display);
 
@@ -861,9 +882,8 @@ static void handle_new_output(struct wl_listener *listener, void *data) {
         return;
     }
 
-    const float background_color[] = { 0.08f, 0.12f, 0.20f, 1.0f };
     wlr_scene_rect_create(&server->scene->tree, output->width,
-        output->height, background_color);
+        output->height, server->config->output.background_color);
     if (server->cursor_scene == NULL && server->cursor_image != NULL &&
         server->cursor_image->image_count > 0) {
         struct wlr_buffer *buffer = wlr_xcursor_image_get_buffer(
@@ -972,7 +992,8 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    server.seat = wlr_seat_create(server.display, "seat0");
+    server.config = &horizon_default_config;
+    server.seat = wlr_seat_create(server.display, server.config->seat_name);
     if (server.seat == NULL) {
         fprintf(stderr, "horizon: failed to create seat\n");
         wl_display_destroy(server.display);
@@ -989,7 +1010,9 @@ int main(int argc, char *argv[]) {
     }
 
     server.cursor = wlr_cursor_create();
-    server.cursor_manager = wlr_xcursor_manager_create("Adwaita", 24);
+    server.cursor_manager = wlr_xcursor_manager_create(
+        server.config->output.cursor_theme,
+        server.config->output.cursor_size);
     server.output_layout = wlr_output_layout_create(server.display);
     if (server.cursor == NULL || server.cursor_manager == NULL ||
         server.output_layout == NULL) {
@@ -1105,7 +1128,7 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Hello from horizon, a Wayland compositor!\n");
-    printf("Seat ready: seat0\n");
+    printf("Seat ready: %s\n", server.config->seat_name);
     printf("Listening on WAYLAND_DISPLAY=%s\n", socket);
     fflush(stdout);
 
