@@ -93,6 +93,7 @@ struct horizon_xdg_toplevel {
     struct horizon_decorator *decorator;
     bool configured;
     bool fullscreen;
+    bool maximized;
     struct horizon_server *server;
     struct wl_list link;
     struct wl_listener map;
@@ -110,7 +111,8 @@ static void update_view_layout(struct horizon_xdg_toplevel *view) {
     int x = 80;
     int y = 80;
 
-    if (view->fullscreen && view->server->output != NULL) {
+    if ((view->fullscreen || view->maximized) &&
+        view->server->output != NULL) {
         width = view->server->output->width;
         height = view->server->output->height;
         x = 0;
@@ -190,13 +192,6 @@ static struct horizon_xdg_toplevel *view_at(
     }
 
     return NULL;
-}
-
-static const char *view_title(struct horizon_xdg_toplevel *view) {
-    if (view == NULL || view->toplevel->title == NULL) {
-        return "none";
-    }
-    return view->toplevel->title;
 }
 
 static bool cursor_accepts_input(struct wlr_scene_buffer *buffer,
@@ -545,22 +540,33 @@ static void handle_xdg_commit(struct wl_listener *listener, void *data) {
 
     if (!view->configured && view->toplevel->base->initialized) {
         configure_view_decoration(view);
+
+        /* Open every application maximized, while keeping it a normal
+         * xdg-toplevel rather than forcing fullscreen mode. */
+        view->maximized = true;
+        wlr_xdg_toplevel_set_maximized(view->toplevel, true);
+
         if (view->toplevel->requested.fullscreen) {
             view->fullscreen = true;
             wlr_xdg_toplevel_set_fullscreen(view->toplevel, true);
         }
         wlr_xdg_toplevel_set_size(view->toplevel,
-            view->fullscreen && view->server->output != NULL ?
+            (view->fullscreen || view->maximized) &&
+                view->server->output != NULL ?
                 view->server->output->width : 800,
-            view->fullscreen && view->server->output != NULL ?
+            (view->fullscreen || view->maximized) &&
+                view->server->output != NULL ?
                 view->server->output->height : 600);
         wlr_xdg_toplevel_set_activated(view->toplevel, false);
         view->configured = true;
-        HORIZON_DEBUG_LOG("xdg initial configure sent: fullscreen=%d size=%dx%d",
+        HORIZON_DEBUG_LOG("xdg initial configure sent: fullscreen=%d maximized=%d size=%dx%d",
             view->fullscreen,
-            view->fullscreen && view->server->output != NULL ?
+            view->maximized,
+            (view->fullscreen || view->maximized) &&
+                view->server->output != NULL ?
                 view->server->output->width : 800,
-            view->fullscreen && view->server->output != NULL ?
+            (view->fullscreen || view->maximized) &&
+                view->server->output != NULL ?
                 view->server->output->height : 600);
     }
     update_view_layout(view);
@@ -572,12 +578,13 @@ static void handle_xdg_request_fullscreen(struct wl_listener *listener,
     struct horizon_xdg_toplevel *view =
         wl_container_of(listener, view, request_fullscreen);
     view->fullscreen = view->toplevel->requested.fullscreen;
+    view->maximized = true;
+    wlr_xdg_toplevel_set_maximized(view->toplevel, true);
     wlr_xdg_toplevel_set_fullscreen(view->toplevel, view->fullscreen);
-    if (view->fullscreen && view->server->output != NULL) {
+    if ((view->fullscreen || view->maximized) &&
+        view->server->output != NULL) {
         wlr_xdg_toplevel_set_size(view->toplevel,
             view->server->output->width, view->server->output->height);
-    } else {
-        wlr_xdg_toplevel_set_size(view->toplevel, 800, 600);
     }
     update_view_layout(view);
 }
@@ -634,6 +641,7 @@ static void handle_new_toplevel(struct wl_listener *listener, void *data) {
         return;
     }
     view->fullscreen = toplevel->requested.fullscreen;
+    view->maximized = true;
     update_view_layout(view);
     view->scene_tree->node.data = view;
     wl_list_insert(&server->views, &view->link);
