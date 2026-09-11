@@ -784,7 +784,9 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
         break;
     case HORIZON_ACTION_FULLSCREEN:
         if (server->focused_view != NULL) {
-            set_view_state(server->focused_view, false, true);
+            struct horizon_xdg_toplevel *view = server->focused_view;
+            set_view_state(view, false, !view->fullscreen);
+            arrange_views(server);
         }
         break;
     case HORIZON_ACTION_EXIT:
