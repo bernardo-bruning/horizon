@@ -91,6 +91,7 @@ struct horizon_server {
     int resize_start_y;
     int resize_start_width;
     int resize_start_height;
+    bool consumed_keycodes[KEY_MAX + 1];
 };
 
 struct horizon_output {
@@ -139,6 +140,57 @@ static void update_view_layout(struct horizon_xdg_toplevel *view) {
 
     wlr_scene_node_set_position(&view->scene_tree->node, x, y);
     horizon_decorator_update(view->decorator, x, y, width, height);
+}
+
+static void apply_view_geometry(struct horizon_xdg_toplevel *view,
+    int x, int y, int width, int height) {
+    view->x = x;
+    view->y = y;
+    wlr_xdg_toplevel_set_size(view->toplevel, width, height);
+    wlr_scene_node_set_position(&view->scene_tree->node, x, y);
+    horizon_decorator_update(view->decorator, x, y, width, height);
+}
+
+static void arrange_views(struct horizon_server *server) {
+    if (!server->config->window.tile_on_start || server->output == NULL) {
+        return;
+    }
+
+    size_t count = 0;
+    struct horizon_xdg_toplevel *view;
+    wl_list_for_each(view, &server->views, link) {
+        if (view->toplevel->base->surface->mapped &&
+            !view->fullscreen && !view->maximized) {
+            count++;
+        }
+    }
+    if (count == 0) {
+        return;
+    }
+
+    int output_width = server->output->width;
+    int output_height = server->output->height;
+    int master_width = count == 1 ? output_width : output_width / 2;
+    size_t stack_index = 0;
+
+    wl_list_for_each(view, &server->views, link) {
+        if (!view->toplevel->base->surface->mapped ||
+            view->fullscreen || view->maximized) {
+            continue;
+        }
+
+        if (stack_index == 0) {
+            apply_view_geometry(view, 0, 0, master_width, output_height);
+        } else {
+            size_t stack_count = count - 1;
+            int stack_width = output_width - master_width;
+            int y = (int)((stack_index - 1) * output_height / stack_count);
+            int next_y = (int)(stack_index * output_height / stack_count);
+            apply_view_geometry(view, master_width, y, stack_width,
+                next_y - y);
+        }
+        stack_index++;
+    }
 }
 
 static void configure_view_decoration(struct horizon_xdg_toplevel *view) {
@@ -661,6 +713,11 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
         view_title(server->focused_view));
 
     if (event->state != WL_KEYBOARD_KEY_STATE_PRESSED) {
+        if (event->keycode <= KEY_MAX &&
+            server->consumed_keycodes[event->keycode]) {
+            server->consumed_keycodes[event->keycode] = false;
+            return;
+        }
         wlr_seat_keyboard_notify_key(server->seat,
             event->time_msec, event->keycode, event->state);
         return;
@@ -682,16 +739,22 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
     const struct horizon_key_binding *binding = horizon_find_key_binding(
         &server->config->input, event->keycode, modifiers, keysym);
     if (binding != NULL && binding->action == HORIZON_ACTION_EXIT) {
+        if (event->keycode <= KEY_MAX) {
+            server->consumed_keycodes[event->keycode] = true;
+        }
         printf("Exiting horizon\n");
         fflush(stdout);
         wl_display_terminate(server->display);
         return;
     }
 
-    wlr_seat_keyboard_notify_key(server->seat,
-        event->time_msec, event->keycode, event->state);
     if (binding == NULL) {
+        wlr_seat_keyboard_notify_key(server->seat,
+            event->time_msec, event->keycode, event->state);
         return;
+    }
+    if (event->keycode <= KEY_MAX) {
+        server->consumed_keycodes[event->keycode] = true;
     }
 
     switch (binding->action) {
@@ -736,6 +799,7 @@ static void handle_xdg_map(struct wl_listener *listener, void *data) {
     fflush(stdout);
     update_pointer_focus(view->server, 0);
     focus_initial_view(view->server, view);
+    arrange_views(view->server);
 }
 
 static void handle_new_toplevel_decoration(struct wl_listener *listener,
@@ -768,6 +832,7 @@ static void handle_xdg_unmap(struct wl_listener *listener, void *data) {
         focus_view(view->server, NULL, 0, 0);
     }
     update_pointer_focus(view->server, 0);
+    arrange_views(view->server);
     HORIZON_DEBUG_LOG("xdg unmap: title=%s", view_title(view));
 }
 
@@ -785,7 +850,8 @@ static void handle_xdg_commit(struct wl_listener *listener, void *data) {
         configure_view_decoration(view);
 
         /* Apply the configured initial window policy. */
-        view->maximized = view->server->config->window.maximize_on_start;
+        view->maximized = !view->server->config->window.tile_on_start &&
+            view->server->config->window.maximize_on_start;
         wlr_xdg_toplevel_set_maximized(view->toplevel, view->maximized);
 
         if (view->server->config->window.accept_client_fullscreen &&
@@ -860,6 +926,7 @@ static void handle_xdg_destroy(struct wl_listener *listener, void *data) {
     wl_list_remove(&view->request_fullscreen.link);
     wl_list_remove(&view->destroy.link);
     wl_list_remove(&view->link);
+    arrange_views(view->server);
     horizon_decorator_destroy(view->decorator);
     free(view);
 }

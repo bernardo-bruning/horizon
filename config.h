@@ -25,6 +25,7 @@ struct horizon_key_binding {
 };
 
 struct horizon_window_config {
+	bool tile_on_start;
 	bool maximize_on_start;
 	bool accept_client_fullscreen;
 	int default_width;
