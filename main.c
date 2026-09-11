@@ -86,6 +86,11 @@ struct horizon_server {
     struct horizon_xdg_toplevel *drag_view;
     int drag_offset_x;
     int drag_offset_y;
+    struct horizon_xdg_toplevel *resize_view;
+    int resize_start_x;
+    int resize_start_y;
+    int resize_start_width;
+    int resize_start_height;
 };
 
 struct horizon_output {
@@ -355,6 +360,44 @@ static void update_cursor_scene(struct horizon_server *server) {
     }
 }
 
+static void resize_view_at_cursor(struct horizon_server *server) {
+    struct horizon_xdg_toplevel *view = server->resize_view;
+    if (view == NULL) {
+        return;
+    }
+
+    int width = server->resize_start_width +
+        (int)server->cursor->x - server->resize_start_x;
+    int height = server->resize_start_height +
+        (int)server->cursor->y - server->resize_start_y;
+    if (view->toplevel->current.min_width > 0 &&
+        width < view->toplevel->current.min_width) {
+        width = view->toplevel->current.min_width;
+    }
+    if (view->toplevel->current.min_height > 0 &&
+        height < view->toplevel->current.min_height) {
+        height = view->toplevel->current.min_height;
+    }
+    if (view->toplevel->current.max_width > 0 &&
+        width > view->toplevel->current.max_width) {
+        width = view->toplevel->current.max_width;
+    }
+    if (view->toplevel->current.max_height > 0 &&
+        height > view->toplevel->current.max_height) {
+        height = view->toplevel->current.max_height;
+    }
+    if (width < 1) {
+        width = 1;
+    }
+    if (height < 1) {
+        height = 1;
+    }
+
+    wlr_xdg_toplevel_set_size(view->toplevel, width, height);
+    horizon_decorator_update(view->decorator, view->x, view->y,
+        width, height);
+}
+
 static void handle_cursor_motion(struct wl_listener *listener, void *data) {
     (void)data;
     struct horizon_server *server =
@@ -390,6 +433,7 @@ static void handle_pointer_motion(struct wl_listener *listener, void *data) {
             view->toplevel->current.height > 0 ? view->toplevel->current.height :
                 view->server->config->window.default_height);
     }
+    resize_view_at_cursor(pointer->server);
     update_cursor_scene(pointer->server);
     update_pointer_focus(pointer->server, event->time_msec);
 }
@@ -415,6 +459,7 @@ static void handle_pointer_motion_absolute(struct wl_listener *listener, void *d
             view->toplevel->current.height > 0 ? view->toplevel->current.height :
                 view->server->config->window.default_height);
     }
+    resize_view_at_cursor(pointer->server);
     update_cursor_scene(pointer->server);
     update_pointer_focus(pointer->server, event->time_msec);
 }
@@ -425,6 +470,7 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
     struct wlr_pointer_button_event *event = data;
 
     bool left_button = event->button == BTN_LEFT;
+    bool right_button = event->button == BTN_RIGHT;
     bool logo_pressed = pointer->server->keyboard_group != NULL &&
         (wlr_keyboard_get_modifiers(
             &pointer->server->keyboard_group->keyboard) & WLR_MODIFIER_LOGO);
@@ -447,9 +493,39 @@ static void handle_pointer_button(struct wl_listener *listener, void *data) {
             return;
         }
     }
+    if (right_button && event->state == WL_POINTER_BUTTON_STATE_PRESSED &&
+        logo_pressed) {
+        double sx, sy;
+        struct horizon_xdg_toplevel *view = view_at(
+            pointer->server, &sx, &sy);
+        if (view != NULL && !view->maximized && !view->fullscreen) {
+            pointer->server->resize_view = view;
+            pointer->server->resize_start_x =
+                (int)pointer->server->cursor->x;
+            pointer->server->resize_start_y =
+                (int)pointer->server->cursor->y;
+            pointer->server->resize_start_width =
+                view->toplevel->current.width > 0 ?
+                view->toplevel->current.width :
+                view->server->config->window.default_width;
+            pointer->server->resize_start_height =
+                view->toplevel->current.height > 0 ?
+                view->toplevel->current.height :
+                view->server->config->window.default_height;
+            wlr_xdg_toplevel_set_resizing(view->toplevel, true);
+            return;
+        }
+    }
     if (left_button && event->state == WL_POINTER_BUTTON_STATE_RELEASED &&
         pointer->server->drag_view != NULL) {
         pointer->server->drag_view = NULL;
+        return;
+    }
+    if (right_button && event->state == WL_POINTER_BUTTON_STATE_RELEASED &&
+        pointer->server->resize_view != NULL) {
+        wlr_xdg_toplevel_set_resizing(
+            pointer->server->resize_view->toplevel, false);
+        pointer->server->resize_view = NULL;
         return;
     }
 
@@ -664,6 +740,9 @@ static void handle_xdg_unmap(struct wl_listener *listener, void *data) {
     if (view->server->drag_view == view) {
         view->server->drag_view = NULL;
     }
+    if (view->server->resize_view == view) {
+        view->server->resize_view = NULL;
+    }
     if (view->server->focused_view == view) {
         focus_view(view->server, NULL, 0, 0);
     }
@@ -749,6 +828,9 @@ static void handle_xdg_destroy(struct wl_listener *listener, void *data) {
     }
     if (view->server->pointer_view == view) {
         view->server->pointer_view = NULL;
+    }
+    if (view->server->resize_view == view) {
+        view->server->resize_view = NULL;
     }
     HORIZON_DEBUG_LOG("xdg destroy");
     wl_list_remove(&view->map.link);
